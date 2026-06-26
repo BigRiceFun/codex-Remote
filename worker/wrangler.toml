@@ -1,0 +1,19 @@
+name = "codex-remote"
+main = "src/worker.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+# Durable Objects bindings
+[[durable_objects.bindings]]
+name = "CODEX_ROOM"
+class_name = "CodexRoom"
+
+# Migrations: first deploy with "new_sqlite_classes" on free plan.
+# See https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CodexRoom"]
+
+# Optional: set via `wrangler secret put` instead of hard-coding.
+# [vars]
+# BROWSER_KEY = "change-me"

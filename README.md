@@ -1,1 +1,186 @@
-# codex-Remote
+# Codex Remote Web 控制台
+
+浏览器 → Cloudflare Worker (Durable Object) → Windows Agent → Codex CLI。
+
+## 目录结构
+
+```
+codex-Remote/
+├─ doc/方案.md
+├─ worker/           Cloudflare Worker + DO (TypeScript)
+│  ├─ src/worker.ts
+│  ├─ src/codex-room.ts
+│  ├─ wrangler.toml
+│  └─ package.json
+└─ agent/            Windows Agent (Go 单二进制)
+   ├─ main.go
+   ├─ engine.go
+   ├─ sessions.go
+   ├─ protocol.go
+   └─ go.mod
+```
+
+## 架构
+
+```
+Browser  ── HTTPS/WSS ──▶  Cloudflare Worker  ── WSS ──▶  Windows Agent  ──▶  Codex CLI
+                              + Durable Object
+                          (房间 = "default"，消息中继/广播)
+```
+
+Durable Object `CodexRoom`：
+- 维护一个 agent 连接 + 多个 browser 连接
+- 缓存最近 500 行 stream，供新连接回看
+- 维护 `sessions` 列表和 `status`（running/current/owner/queue）
+- 对外 REST：`/api/sessions` `/api/status` `/api/send`
+- 对外 WS：`/ws/client` `/ws/agent`
+
+---
+
+## WebSocket 协议
+
+### browser → worker (`/ws/client?key=...`)
+```json
+{ "type": "hello" }
+{ "type": "select", "session": "<id>" }      // 切换会话，触发回放缓冲
+{ "type": "send",   "session": "<id>", "text": "..." }
+```
+
+### agent → worker (`/ws/agent?token=...`)
+```json
+{ "type": "sessions", "sessions": [{ "id": "...", "title": "..." }] }
+{ "type": "status",   "status":  { "running": true, "current": "abc", "owner": "web", "queue": [] } }
+{ "type": "stream",   "session": "abc", "content": "正在分析..." }
+{ "type": "system",   "session": "abc", "content": "codex started" }
+{ "type": "error",    "session": "abc", "content": "..." }
+```
+
+### worker → agent (server.push)
+```json
+{ "type": "send", "session": "<id>", "text": "..." }
+```
+
+### worker → 所有 browser (broadcast)
+- `hello` / `agent_status`：在线状态 + sessions + status
+- `sessions`：列表更新
+- `status`：running/current/owner/queue 更新
+- `stream`：实时输出
+- `input_echo`：回显用户输入
+- `system` / `error`
+
+---
+
+## 输入控制 / 排队
+
+Engine 状态：
+
+- `running`：是否有 codex 进程在跑
+- `currentSession`：当前运行的会话
+- `queue`：待发送消息队列（纯文本或 `[session] text` 跨会话标签）
+- `owner`：当前持有输入锁的角色，5 分钟无操作自动释放
+
+规则：
+
+- 若发往当前 session 且 running=true → 入队
+- 若发往不同 session 且 running=true → 入队并加 `[session]` 前缀，出队时切换会话
+- codex 进程退出后，自动出队发送下一条
+
+---
+
+## 部署步骤
+
+### 1) Worker
+
+```bash
+cd worker
+npm install
+
+# 设置 agent token（secret）
+npx wrangler secret put AGENT_TOKEN
+# 粘贴一个随机字符串，比如 64 位 hex
+
+# 可选：浏览器访问 key（留空则不启用，生产建议改用 Cloudflare Access）
+# 本地调试：在 wrangler.toml [vars] 里加 BROWSER_KEY = "xxx"
+#   或 `npx wrangler secret put BROWSER_KEY`
+
+npx wrangler deploy
+```
+
+部署后你会得到 `https://codex-remote.<you>.workers.dev`。
+
+> 首次部署带 `new_classes` migration；后续修改 DO 结构时再加新的 migration tag 即可。
+
+### 2) Agent (Windows)
+
+需要 Go 1.22+：
+
+```bash
+cd agent
+go mod tidy
+go build -o codex-agent.exe .
+
+# 运行（任选一种 token 传递方式）
+$env:CODEX_AGENT_TOKEN = "刚才那个 token"
+$env:CODEX_WORKER      = "wss://codex-remote.<you>.workers.dev/ws/agent"
+./codex-agent.exe
+
+# 或者命令行
+./codex-agent.exe -worker "wss://codex-remote.<you>.workers.dev/ws/agent" -token "..."
+```
+
+或把 token 存到 `~/.codex/remote-token`，省略 `-token`。
+
+确认 agent 启动后日志出现 `connected to ...`。
+
+### 3) 浏览器
+
+直接打开：
+
+```
+https://codex-remote.<you>.workers.dev/
+```
+
+如果配置了 `BROWSER_KEY`：
+
+```
+https://codex-remote.<you>.workers.dev/?key=YOUR_KEY
+```
+
+---
+
+## 本地联调
+
+```bash
+# 终端 1：起 worker
+cd worker && npx wrangler dev      # 默认 http://localhost:8787
+
+# 终端 2：起 agent（连本地）
+cd agent && go run . -worker "ws://localhost:8787/ws/agent" -token "dev-token"
+# (并在 worker 里临时把 AGENT_TOKEN 设为 "dev-token"，比如 .dev.vars)
+```
+
+`.dev.vars` 示例：
+
+```
+AGENT_TOKEN=dev-token
+BROWSER_KEY=
+```
+
+浏览器开 `http://localhost:8787/`。
+
+---
+
+## 安全说明
+
+- Agent → Worker：必须带 `token`（query 或 `X-Codex-Token`），和 Worker 的 `AGENT_TOKEN` secret 比对。
+- Browser → Worker：可选 `BROWSER_KEY`（query `?key=` 或 header `X-Codex-Key`）。**生产环境强烈建议用 Cloudflare Access**，不要把 key 到处分享。
+- 全链路 HTTPS/WSS。
+
+---
+
+## 已知限制 / 扩展点
+
+- 每个 Worker 只有一个 `default` 房间（所有 browser 共享一个 agent）。多用户隔离时换成按用户 ID 分房间。
+- Agent 单条 stdout 行即一条 stream 消息，不做 token 级流式（Codex CLI 本身就是按行）。
+- 审批 (approval) 功能未单独实现：codex 的 `[y/n]` 提示会以 stream 形式显示，用户在输入框里打 `y` 回车即可（走 `send` → 交给 Engine.PumpStdin 或排队）。如果需要显式审批 UI，可在 Engine 里识别 stdout 中的 `Allow command?` 并发 `type:"approval"` 消息。
+- 没有数据库；Durable Object 内存即所有状态，重启会丢历史（但 codex 会话文件仍在 `~/.codex`）。
