@@ -1,5 +1,13 @@
 # Codex Remote Web 控制台
 
+## 背景
+
+Codex 桌面版本身支持和手机 App 同步会话，但前提是桌面端和手机端登录同一个账号。这样在手机上打开 App 时，才能看到电脑上的会话，并继续控制电脑里的 Codex。
+
+我的日常使用方式不太一样：我通常是直接用 API 登录 Codex 桌面版，而不是通过同一个账号体系登录。这样一来，手机 App 就无法同步这些桌面端会话，也就没法在手机上继续控制电脑上的 Codex。
+
+所以我做了这个项目：通过浏览器、Cloudflare Worker 和本地 Windows Agent，把电脑上的 Codex 会话暴露成一个自己的远程 Web 控制台。这样即使用 API 方式登录桌面版，也可以从手机浏览器查看会话、发送消息、接收实时输出。
+
 浏览器 → Cloudflare Worker (Durable Object) → Windows Agent → Codex CLI。
 
 ## 目录结构
