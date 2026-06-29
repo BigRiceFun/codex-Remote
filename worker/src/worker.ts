@@ -1189,6 +1189,7 @@ function setAgentOnline(v) {
   $('agentDot').className = 'status-dot ' + (v ? 'online' : '');
   $('agentState').textContent = v ? 'Agent 在线' : 'Agent 离线';
   $('panelAgent').textContent = v ? '在线' : '离线';
+  if (!v) renderOfflineSidebar();
   updateComposerState();
   renderInfoPanel();
 }
@@ -1254,6 +1255,11 @@ function renderSidebar(list) {
   sidebar.querySelectorAll('.conversation-item').forEach(el => {
     el.onclick = () => selectSession(el.dataset.id);
   });
+}
+
+function renderOfflineSidebar() {
+  sessions = [];
+  sidebar.innerHTML = '<div class="empty">Agent 离线</div>';
 }
 
 function renderSessionItem(s) {
@@ -1633,12 +1639,14 @@ function connect() {
     switch (m.type) {
       case 'hello':
       case 'agent_status':
-        setAgentOnline(!!m.online);
-        if (m.sessions) renderSidebar(m.sessions);
+        const online = !!m.online;
+        setAgentOnline(online);
+        if (online && m.sessions) renderSidebar(m.sessions);
         if (m.status) setStatus(m.status);
         break;
       case 'sessions':
-        renderSidebar(m.sessions);
+        if (connected) renderSidebar(m.sessions);
+        else renderOfflineSidebar();
         break;
       case 'status':
         setStatus(m.status);
@@ -1685,7 +1693,8 @@ function updateComposerState() {
 
 searchInput.addEventListener('input', e => {
   sidebarQuery = String(e.target.value || '').trim().toLowerCase();
-  renderSidebar(sessions);
+  if (connected) renderSidebar(sessions);
+  else renderOfflineSidebar();
 });
 
 sendBtn.onclick = () => {
