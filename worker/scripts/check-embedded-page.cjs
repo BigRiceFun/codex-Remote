@@ -31,15 +31,18 @@ if (!ts.isNoSubstitutionTemplateLiteral(template)) {
 
 const html = template.rawText ?? template.text;
 
-const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/);
-if (!scriptMatch) {
+const scriptMatches = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+if (!scriptMatches.length) {
   throw new Error("Embedded page does not contain a script block.");
 }
 
-new vm.Script(scriptMatch[1], { filename: "embedded-page.js" });
+for (const [index, scriptMatch] of scriptMatches.entries()) {
+  new vm.Script(scriptMatch[1], { filename: `embedded-page-${index + 1}.js` });
+}
 
 const ids = new Set([...html.matchAll(/id="([^"]+)"/g)].map((match) => match[1]));
-const missingIds = [...scriptMatch[1].matchAll(/\$\('([^']+)'\)/g)]
+const scriptSource = scriptMatches.map((match) => match[1]).join("\n");
+const missingIds = [...scriptSource.matchAll(/\$\('([^']+)'\)/g)]
   .map((match) => match[1])
   .filter((id, index, all) => all.indexOf(id) === index && !ids.has(id));
 

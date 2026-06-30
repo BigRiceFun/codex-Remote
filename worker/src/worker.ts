@@ -14,8 +14,16 @@ const HTML_PAGE = String.raw`<!doctype html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Codex Remote</title>
+<script>
+  (function () {
+    try {
+      document.documentElement.classList.toggle('light', localStorage.getItem('codex_theme') === 'light');
+    } catch {}
+  })();
+</script>
 <style>
   :root {
+    color-scheme: dark;
     --bg: #0f1115;
     --sidebar: #14161b;
     --card: #181b20;
@@ -28,11 +36,61 @@ const HTML_PAGE = String.raw`<!doctype html>
     --success: #22c55e;
     --warning: #f59e0b;
     --error: #ef4444;
+    --error-soft: rgba(127, 29, 29, .12);
+    --error-text: #fca5a5;
+    --warning-soft: rgba(245, 158, 11, .08);
+    --warning-border: rgba(245, 158, 11, .25);
+    --warning-text: #fbbf24;
+    --success-border: rgba(34, 197, 94, .35);
+    --empty-bg: rgba(24, 27, 32, .35);
+    --backdrop: rgba(0, 0, 0, .45);
+    --scroll-thumb: #232831;
+    --scroll-thumb-hover: #323846;
+    --code-text: #d7dde8;
     --radius: 10px;
     --transition: 180ms ease-out;
+    --theme-transition: 220ms ease;
+  }
+  html.light {
+    color-scheme: light;
+    --bg: #f5f6f8;
+    --sidebar: #ffffff;
+    --card: #ffffff;
+    --hover: #eef1f5;
+    --border: #d8dde5;
+    --text: #151922;
+    --text-secondary: #4b5563;
+    --muted: #7a8494;
+    --accent: #2563eb;
+    --success: #16a34a;
+    --warning: #d97706;
+    --error: #dc2626;
+    --error-soft: rgba(220, 38, 38, .08);
+    --error-text: #b91c1c;
+    --warning-soft: rgba(217, 119, 6, .08);
+    --warning-border: rgba(217, 119, 6, .22);
+    --warning-text: #92400e;
+    --success-border: rgba(22, 163, 74, .28);
+    --empty-bg: rgba(255, 255, 255, .7);
+    --backdrop: rgba(15, 23, 42, .32);
+    --scroll-thumb: #c4cad3;
+    --scroll-thumb-hover: #a8b0bd;
+    --code-text: #263244;
   }
   * { box-sizing: border-box; }
+  html.theme-switching *,
+  html.theme-switching *::before,
+  html.theme-switching *::after {
+    transition: none !important;
+  }
   html, body { height: 100%; }
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none;
+    mix-blend-mode: normal;
+  }
+  ::view-transition-old(root) { z-index: 1; }
+  ::view-transition-new(root) { z-index: 2147483646; }
   body {
     margin: 0;
     height: 100vh;
@@ -42,6 +100,7 @@ const HTML_PAGE = String.raw`<!doctype html>
     font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 14px;
     line-height: 1.5;
+    transition: background-color var(--theme-transition), color var(--theme-transition);
   }
   button, input, textarea {
     font: inherit;
@@ -77,6 +136,7 @@ const HTML_PAGE = String.raw`<!doctype html>
     padding: 0 16px;
     border-bottom: 1px solid var(--border);
     background: var(--bg);
+    transition: background-color var(--theme-transition), border-color var(--theme-transition);
   }
   .header-left,
   .header-right,
@@ -127,6 +187,7 @@ const HTML_PAGE = String.raw`<!doctype html>
     color: var(--text-secondary);
     background: transparent;
     white-space: nowrap;
+    transition: background-color var(--theme-transition), border-color var(--theme-transition), color var(--theme-transition);
   }
   .status-dot {
     width: 8px;
@@ -152,7 +213,7 @@ const HTML_PAGE = String.raw`<!doctype html>
     min-height: 0;
     width: 100%;
     overflow: hidden;
-    transition: width var(--transition), border-color var(--transition);
+    transition: width var(--transition), background-color var(--theme-transition), border-color var(--transition);
   }
   .app.sidebar-collapsed {
     --sidebar-width: 0px;
@@ -260,7 +321,7 @@ const HTML_PAGE = String.raw`<!doctype html>
   .sidebar-card {
     border: 1px solid var(--border);
     border-radius: 12px;
-    background: #121419;
+    background: color-mix(in srgb, var(--card) 82%, var(--bg));
     overflow: hidden;
   }
   .sidebar-card + .sidebar-card {
@@ -339,8 +400,8 @@ const HTML_PAGE = String.raw`<!doctype html>
     border-color: var(--border);
   }
   .conversation-item.active {
-    background: #1a1e25;
-    border-color: #313743;
+    background: color-mix(in srgb, var(--hover) 76%, var(--card));
+    border-color: color-mix(in srgb, var(--border) 70%, var(--text-secondary));
   }
   .conversation-badge {
     width: 18px;
@@ -352,12 +413,12 @@ const HTML_PAGE = String.raw`<!doctype html>
     justify-content: center;
     flex: 0 0 18px;
     margin-top: 1px;
-    background: #121419;
+    background: color-mix(in srgb, var(--card) 82%, var(--bg));
     color: var(--muted);
   }
   .conversation-item.running .conversation-badge {
     color: var(--warning);
-    border-color: rgba(245, 158, 11, .35);
+    border-color: var(--warning-border);
   }
   .conversation-copy {
     min-width: 0;
@@ -470,8 +531,8 @@ const HTML_PAGE = String.raw`<!doctype html>
     word-break: break-word;
   }
   .bubble.user {
-    background: #15191f;
-    border-color: #2f3742;
+    background: color-mix(in srgb, var(--card) 80%, var(--hover));
+    border-color: color-mix(in srgb, var(--border) 70%, var(--text-secondary));
   }
   .bubble.system {
     background: transparent;
@@ -479,9 +540,9 @@ const HTML_PAGE = String.raw`<!doctype html>
     color: var(--text-secondary);
   }
   .bubble.error {
-    border-color: rgba(239, 68, 68, .35);
-    color: #fca5a5;
-    background: rgba(127, 29, 29, .12);
+    border-color: color-mix(in srgb, var(--error) 35%, transparent);
+    color: var(--error-text);
+    background: var(--error-soft);
   }
   .bubble.thinking {
     color: var(--text-secondary);
@@ -547,7 +608,7 @@ const HTML_PAGE = String.raw`<!doctype html>
   }
   .markdown th {
     color: var(--text-secondary);
-    background: #121419;
+    background: color-mix(in srgb, var(--card) 82%, var(--bg));
     font-weight: 600;
   }
   .inline-code {
@@ -555,7 +616,7 @@ const HTML_PAGE = String.raw`<!doctype html>
     padding: 0 6px;
     border-radius: 6px;
     border: 1px solid var(--border);
-    background: #121419;
+    background: color-mix(in srgb, var(--card) 82%, var(--bg));
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: .92em;
   }
@@ -568,7 +629,7 @@ const HTML_PAGE = String.raw`<!doctype html>
     display: inline-block;
     padding: 0 4px;
     border-radius: 5px;
-    background: rgba(18, 20, 25, .85);
+    background: color-mix(in srgb, var(--card) 84%, var(--bg));
     border: 1px solid var(--border);
   }
   .math-block {
@@ -577,14 +638,14 @@ const HTML_PAGE = String.raw`<!doctype html>
     padding: 10px 12px;
     border-radius: 8px;
     border: 1px solid var(--border);
-    background: #111317;
+    background: color-mix(in srgb, var(--card) 82%, var(--bg));
     overflow-x: auto;
   }
   .code-block {
     overflow: hidden;
     border: 1px solid var(--border);
     border-radius: 10px;
-    background: #111317;
+    background: color-mix(in srgb, var(--card) 82%, var(--bg));
   }
   .code-head {
     height: 38px;
@@ -596,7 +657,7 @@ const HTML_PAGE = String.raw`<!doctype html>
     border-bottom: 1px solid var(--border);
     color: var(--text-secondary);
     font-size: 12px;
-    background: #15181d;
+    background: color-mix(in srgb, var(--card) 90%, var(--bg));
   }
   .code-head strong {
     font-weight: 600;
@@ -618,7 +679,7 @@ const HTML_PAGE = String.raw`<!doctype html>
   }
   .code-copy.copied {
     color: var(--success);
-    border-color: rgba(34, 197, 94, .35);
+    border-color: var(--success-border);
   }
   .code-block pre {
     margin: 0;
@@ -627,7 +688,7 @@ const HTML_PAGE = String.raw`<!doctype html>
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 13px;
     line-height: 1.6;
-    color: #d7dde8;
+    color: var(--code-text);
   }
   .composer-wrap {
     padding: 0 24px 24px;
@@ -637,10 +698,10 @@ const HTML_PAGE = String.raw`<!doctype html>
   .queue {
     margin: 12px 0 0;
     padding: 10px 12px;
-    border: 1px solid rgba(245, 158, 11, .25);
+    border: 1px solid var(--warning-border);
     border-radius: 10px;
-    background: rgba(245, 158, 11, .08);
-    color: #fbbf24;
+    background: var(--warning-soft);
+    color: var(--warning-text);
     font-size: 12px;
   }
   .composer {
@@ -701,13 +762,13 @@ const HTML_PAGE = String.raw`<!doctype html>
     background: transparent;
   }
   .btn-primary {
-    background: #1f232a;
+    background: color-mix(in srgb, var(--card) 72%, var(--hover));
     color: var(--text);
-    border-color: #313743;
+    border-color: color-mix(in srgb, var(--border) 70%, var(--text-secondary));
   }
   .btn-primary:hover:not(:disabled) {
-    background: #252a33;
-    border-color: #3b434f;
+    background: color-mix(in srgb, var(--hover) 76%, var(--card));
+    border-color: color-mix(in srgb, var(--border) 55%, var(--text-secondary));
     color: var(--text);
   }
   .iconbtn {
@@ -727,6 +788,31 @@ const HTML_PAGE = String.raw`<!doctype html>
     background: var(--hover);
     color: var(--text);
   }
+  .theme-button {
+    position: relative;
+  }
+  .theme-button svg {
+    position: absolute;
+    inset: 50% auto auto 50%;
+    transform: translate(-50%, -50%);
+    transition: opacity var(--transition), transform var(--transition);
+  }
+  .theme-button .sun-icon {
+    opacity: 0;
+    transform: translate(-50%, -50%) rotate(-45deg) scale(.72);
+  }
+  .theme-button .moon-icon {
+    opacity: 1;
+    transform: translate(-50%, -50%) rotate(0) scale(1);
+  }
+  html.light .theme-button .sun-icon {
+    opacity: 1;
+    transform: translate(-50%, -50%) rotate(0) scale(1);
+  }
+  html.light .theme-button .moon-icon {
+    opacity: 0;
+    transform: translate(-50%, -50%) rotate(45deg) scale(.72);
+  }
   .info-panel {
     position: relative;
     background: var(--bg);
@@ -745,6 +831,7 @@ const HTML_PAGE = String.raw`<!doctype html>
     border-radius: 10px;
     background: var(--card);
     padding: 16px;
+    transition: background-color var(--theme-transition), border-color var(--theme-transition);
   }
   .panel-card + .panel-card {
     margin-top: 16px;
@@ -787,12 +874,12 @@ const HTML_PAGE = String.raw`<!doctype html>
     text-align: center;
     padding: 24px;
     color: var(--muted);
-    background: rgba(24, 27, 32, .35);
+    background: var(--empty-bg);
   }
   .backdrop {
     position: fixed;
     inset: 48px 0 0;
-    background: rgba(0, 0, 0, .45);
+    background: var(--backdrop);
     display: none;
     z-index: 40;
   }
@@ -801,9 +888,9 @@ const HTML_PAGE = String.raw`<!doctype html>
   }
   *::-webkit-scrollbar { width: 8px; height: 8px; }
   *::-webkit-scrollbar-track { background: transparent; }
-  *::-webkit-scrollbar-thumb { background: #232831; border-radius: 999px; }
-  *::-webkit-scrollbar-thumb:hover { background: #323846; }
-  * { scrollbar-width: thin; scrollbar-color: #232831 transparent; }
+  *::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 999px; }
+  *::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
+  * { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; }
   #debug {
     position: fixed;
     right: 12px;
@@ -815,7 +902,7 @@ const HTML_PAGE = String.raw`<!doctype html>
     padding: 10px 12px;
     border: 1px solid var(--border);
     border-radius: 10px;
-    background: #111317;
+    background: color-mix(in srgb, var(--card) 86%, var(--bg));
     color: var(--text-secondary);
     font-size: 12px;
     display: none;
@@ -947,7 +1034,12 @@ const HTML_PAGE = String.raw`<!doctype html>
     <div class="status-pill"><span id="runDot" class="status-dot"></span><span id="runState">空闲</span></div>
     <div id="ownerPill" class="status-pill" style="display:none"><span id="ownerState">占用者：web</span></div>
   </div>
-  <div class="header-right"></div>
+  <div class="header-right">
+    <button id="themeToggle" class="iconbtn theme-button" type="button" aria-label="切换主题" title="切换主题">
+      <span class="sun-icon"></span>
+      <span class="moon-icon"></span>
+    </button>
+  </div>
 </header>
 <div class="app-layout">
   <aside class="sidebar-shell" id="sidebarShell">
@@ -1048,6 +1140,9 @@ const HTML_PAGE = String.raw`<!doctype html>
 const KEY = new URLSearchParams(location.search).get('key') || localStorage.getItem('codex_key') || '';
 if (KEY) localStorage.setItem('codex_key', KEY);
 const DEBUG_MODE = new URLSearchParams(location.search).get('debug') === '1';
+const rootEl = document.documentElement;
+const savedTheme = localStorage.getItem('codex_theme');
+rootEl.classList.toggle('light', savedTheme === 'light');
 
 const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 const wsUrl = proto + '://' + location.host + '/ws/client' + (KEY ? '?key=' + encodeURIComponent(KEY) : '');
@@ -1079,7 +1174,9 @@ const ICONS = {
   send: '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
   'panel-right': '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M15 4v16"/>',
   close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
-  terminal: '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>'
+  terminal: '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
+  moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>'
 };
 
 function icon(name, size) {
@@ -1090,12 +1187,15 @@ function icon(name, size) {
 function setupChrome() {
   $('toggleSidebar').innerHTML = icon('menu', 16);
   $('toggleInfo').innerHTML = icon('panel-right', 16);
+  document.querySelector('#themeToggle .sun-icon').innerHTML = icon('sun', 19);
+  document.querySelector('#themeToggle .moon-icon').innerHTML = icon('moon', 19);
   $('sendBtn').innerHTML = icon('send', 16) + '<span>发送</span>';
   $('searchIcon').innerHTML = ICONS.search;
   debugEl.classList.toggle('visible', DEBUG_MODE);
 }
 
 setupChrome();
+syncThemeButton();
 function dbg(line) {
   const t = new Date().toLocaleTimeString();
   debugLog.unshift('[' + t + '] ' + line);
@@ -1103,6 +1203,61 @@ function dbg(line) {
   debugEl.innerHTML = debugLog.map(s => '<div>' + escapeHtml(s) + '</div>').join('');
 }
 dbg('page loaded');
+
+function isLightTheme() {
+  return rootEl.classList.contains('light');
+}
+
+function syncThemeButton() {
+  const btn = $('themeToggle');
+  if (!btn) return;
+  btn.title = isLightTheme() ? '切换到夜间模式' : '切换到白天模式';
+  btn.setAttribute('aria-label', btn.title);
+}
+
+function applyTheme(isLight) {
+  rootEl.classList.toggle('light', isLight);
+  localStorage.setItem('codex_theme', isLight ? 'light' : 'dark');
+  syncThemeButton();
+}
+
+function toggleTheme(event) {
+  const wasLight = isLightTheme();
+  const nextLight = !wasLight;
+  if (!document.startViewTransition) {
+    applyTheme(nextLight);
+    return;
+  }
+  const x = event.clientX;
+  const y = event.clientY;
+  const endRadius = Math.hypot(
+    Math.max(x, window.innerWidth - x),
+    Math.max(y, window.innerHeight - y)
+  );
+  rootEl.classList.add('theme-switching');
+  const transition = document.startViewTransition(() => {
+    applyTheme(nextLight);
+  });
+  transition.ready.then(() => {
+    const clipPath = [
+      'circle(0px at ' + x + 'px ' + y + 'px)',
+      'circle(' + endRadius + 'px at ' + x + 'px ' + y + 'px)',
+    ];
+    rootEl.animate(
+      { clipPath },
+      {
+        duration: 400,
+        easing: 'ease-in-out',
+        pseudoElement: '::view-transition-new(root)',
+      }
+    );
+  }).catch(() => {});
+  transition.finished.finally(() => {
+    rootEl.classList.remove('theme-switching');
+  });
+}
+
+$('themeToggle').onclick = toggleTheme;
 
 // Sidebar toggle (mobile-friendly)
 const backdropEl = $('backdrop');
