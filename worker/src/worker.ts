@@ -1025,8 +1025,7 @@ const HTML_PAGE = String.raw`<!doctype html>
   <div class="header-left">
     <button id="toggleSidebar" class="iconbtn" aria-label="展开或收起侧边栏"></button>
     <div class="header-title-wrap">
-      <div class="header-eyebrow">Codex Remote</div>
-      <div id="headerTitle" class="header-title">选择一个会话</div>
+      <div class="header-title">Codex Remote</div>
     </div>
   </div>
   <div class="header-status">
@@ -1059,8 +1058,8 @@ const HTML_PAGE = String.raw`<!doctype html>
   <main class="main-panel">
     <div class="conversation-head">
       <div class="conversation-head-main">
-        <div id="chatTitle" class="conversation-head-title">选择一个会话</div>
-        <div id="chatPath" class="conversation-head-path">连接 Agent 后查看会话历史</div>
+        <div id="chatTitle" class="conversation-head-title">sessions</div>
+        <div id="chatPath" class="conversation-head-path"></div>
       </div>
       <div class="conversation-head-tools">
         <button id="toggleInfo" class="iconbtn" aria-label="展开或收起信息面板"></button>
@@ -1488,15 +1487,13 @@ function shortenPath(p) {
 function setChatHeader(id) {
   const s = sessions.find(x => x.id === id);
   if (!s) {
-    $('headerTitle').textContent = '选择一个会话';
-    $('chatTitle').textContent = '选择一个会话';
-    $('chatPath').textContent = '连接 Agent 后查看会话历史';
+    $('chatTitle').textContent = 'sessions';
+    $('chatPath').textContent = '';
     renderInfoPanel();
     return;
   }
   const title = s.title || s.id;
   const cwd = s.cwd || '无工作区';
-  $('headerTitle').textContent = title;
   $('chatTitle').textContent = title;
   $('chatPath').textContent = cwd;
   renderInfoPanel();
