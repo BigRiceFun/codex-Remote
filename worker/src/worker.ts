@@ -5,7 +5,7 @@ export { CodexRoom };
 interface Env {
   CODEX_ROOM: DurableObjectNamespace;
   AGENT_TOKEN: string;   // set via `wrangler secret put AGENT_TOKEN`
-  BROWSER_KEY?: string;  // optional simple key for browser
+  BROWSER_PASSWORD?: string; // optional password for browser login
 }
 
 const HTML_PAGE = String.raw`<!doctype html>
@@ -1137,15 +1137,13 @@ const HTML_PAGE = String.raw`<!doctype html>
 <div id="debug"></div>
 </div>
 <script>
-const KEY = new URLSearchParams(location.search).get('key') || localStorage.getItem('codex_key') || '';
-if (KEY) localStorage.setItem('codex_key', KEY);
 const DEBUG_MODE = new URLSearchParams(location.search).get('debug') === '1';
 const rootEl = document.documentElement;
 const savedTheme = localStorage.getItem('codex_theme');
 rootEl.classList.toggle('light', savedTheme === 'light');
 
 const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-const wsUrl = proto + '://' + location.host + '/ws/client' + (KEY ? '?key=' + encodeURIComponent(KEY) : '');
+const wsUrl = proto + '://' + location.host + '/ws/client';
 let ws = null;
 let currentSession = null;
 let sessions = [];
@@ -1888,6 +1886,144 @@ connect();
 </body>
 </html>`;
 
+const LOGIN_PAGE = String.raw`<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Codex Remote 登录</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0f1115;
+    --card: #181b20;
+    --border: #2a2f38;
+    --text: #ffffff;
+    --text-secondary: #9ca3af;
+    --muted: #6b7280;
+    --accent: #3b82f6;
+    --error: #fca5a5;
+    --error-bg: rgba(127, 29, 29, .16);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background: linear-gradient(135deg, #0f1115 0%, #141821 100%);
+    color: var(--text);
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .login {
+    width: min(420px, 100%);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--card) 92%, var(--bg));
+    padding: 28px;
+    box-shadow: 0 24px 80px rgba(0, 0, 0, .32);
+  }
+  .brand {
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  h1 {
+    margin: 0 0 22px;
+    font-size: 24px;
+    line-height: 1.2;
+    font-weight: 650;
+    letter-spacing: 0;
+  }
+  label {
+    display: block;
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+  input {
+    width: 100%;
+    height: 42px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: #11141a;
+    color: var(--text);
+    padding: 0 12px;
+    font: inherit;
+    outline: none;
+  }
+  input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, .18);
+  }
+  button {
+    width: 100%;
+    height: 42px;
+    margin-top: 14px;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+    background: color-mix(in srgb, var(--accent) 78%, #11141a);
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled {
+    opacity: .65;
+    cursor: wait;
+  }
+  .error {
+    display: none;
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--error-bg);
+    color: var(--error);
+    font-size: 13px;
+  }
+  .error.show { display: block; }
+</style>
+</head>
+<body>
+  <form class="login" id="loginForm">
+    <div class="brand">Codex Remote</div>
+    <h1>登录</h1>
+    <label for="password">访问密码</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" autofocus required />
+    <button id="loginButton" type="submit">进入</button>
+    <div id="error" class="error">密码不正确</div>
+  </form>
+<script>
+const form = document.getElementById('loginForm');
+const password = document.getElementById('password');
+const button = document.getElementById('loginButton');
+const error = document.getElementById('error');
+form.addEventListener('submit', async event => {
+  event.preventDefault();
+  button.disabled = true;
+  error.classList.remove('show');
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password: password.value })
+    });
+    if (!res.ok) throw new Error('login failed');
+    const next = new URLSearchParams(location.search).get('next') || '/';
+    location.assign(next);
+  } catch {
+    error.classList.add('show');
+    password.select();
+  } finally {
+    button.disabled = false;
+  }
+});
+</script>
+</body>
+</html>`;
+
 function json(data: unknown, status = 200, headers: Record<string,string> = {}) {
   return new Response(JSON.stringify(data), {
     status,
@@ -1895,11 +2031,116 @@ function json(data: unknown, status = 200, headers: Record<string,string> = {}) 
   });
 }
 
-function checkBrowserKey(request: Request, env: Env): boolean {
-  if (!env.BROWSER_KEY) return true; // no key configured = open (use Cloudflare Access in prod)
+const AUTH_COOKIE = "codex_remote_auth";
+const AUTH_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
+
+async function checkBrowserAuth(request: Request, env: Env): Promise<boolean> {
+  if (!env.BROWSER_PASSWORD) return true;
+  const token = readCookie(request, AUTH_COOKIE);
+  if (!token) return false;
+  return verifyAuthToken(token, env.BROWSER_PASSWORD);
+}
+
+async function handleLogin(request: Request, env: Env): Promise<Response> {
+  if (!env.BROWSER_PASSWORD) return json({ ok: true });
+  const password = await readPassword(request);
+  if (password !== env.BROWSER_PASSWORD) {
+    return json({ error: "bad password" }, 401);
+  }
+  const token = await createAuthToken(env.BROWSER_PASSWORD);
+  return json({ ok: true }, 200, {
+    "set-cookie": serializeAuthCookie(request, token, AUTH_MAX_AGE_SECONDS),
+  });
+}
+
+function logoutResponse(request: Request): Response {
+  return redirect("/login", 302, {
+    "set-cookie": serializeAuthCookie(request, "", 0),
+  });
+}
+
+async function readPassword(request: Request): Promise<string> {
+  const type = request.headers.get("content-type") || "";
+  if (type.includes("application/json")) {
+    const body = await request.json().catch(() => null) as { password?: unknown } | null;
+    return typeof body?.password === "string" ? body.password : "";
+  }
+  const form = await request.formData().catch(() => null);
+  const value = form?.get("password");
+  return typeof value === "string" ? value : "";
+}
+
+async function createAuthToken(secret: string): Promise<string> {
+  const expires = Math.floor(Date.now() / 1000) + AUTH_MAX_AGE_SECONDS;
+  const payload = `v1.${expires}`;
+  const signature = await signAuthPayload(payload, secret);
+  return `${payload}.${signature}`;
+}
+
+async function verifyAuthToken(token: string, secret: string): Promise<boolean> {
+  const parts = token.split(".");
+  if (parts.length !== 3 || parts[0] !== "v1") return false;
+  const expires = Number(parts[1]);
+  if (!Number.isFinite(expires) || expires < Math.floor(Date.now() / 1000)) return false;
+  const payload = `${parts[0]}.${parts[1]}`;
+  const expected = await signAuthPayload(payload, secret);
+  return timingSafeEqual(parts[2], expected);
+}
+
+async function signAuthPayload(payload: string, secret: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
+  return base64Url(signature);
+}
+
+function base64Url(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+function readCookie(request: Request, name: string): string {
+  const cookie = request.headers.get("cookie") || "";
+  for (const part of cookie.split(";")) {
+    const [rawKey, ...rawValue] = part.trim().split("=");
+    if (rawKey === name) return rawValue.join("=");
+  }
+  return "";
+}
+
+function serializeAuthCookie(request: Request, value: string, maxAge: number): string {
+  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
+  return `${AUTH_COOKIE}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure}`;
+}
+
+function redirect(location: string, status = 302, headers: Record<string,string> = {}): Response {
+  return new Response(null, {
+    status,
+    headers: { location, ...headers },
+  });
+}
+
+function loginRedirect(request: Request): Response {
   const url = new URL(request.url);
-  const key = url.searchParams.get("key") || request.headers.get("x-codex-key") || "";
-  return key === env.BROWSER_KEY;
+  const next = encodeURIComponent(url.pathname + url.search);
+  return redirect(`/login?next=${next}`);
 }
 
 export default {
@@ -1908,13 +2149,24 @@ export default {
     const path = url.pathname;
 
     // --- Frontend ----------------------------------------------------------
+    if (path === "/login" && request.method === "GET") {
+      if (await checkBrowserAuth(request, env)) return redirect("/");
+      return new Response(LOGIN_PAGE, { headers: { "content-type": "text/html; charset=utf-8" } });
+    }
+    if (path === "/logout") {
+      return logoutResponse(request);
+    }
+    if (path === "/api/login" && request.method === "POST") {
+      return handleLogin(request, env);
+    }
     if (path === "/" || path === "/index.html") {
+      if (!await checkBrowserAuth(request, env)) return loginRedirect(request);
       return new Response(HTML_PAGE, { headers: { "content-type": "text/html; charset=utf-8" } });
     }
 
     // --- WebSocket: browser & agent ---------------------------------------
     if (path === "/ws/client") {
-      if (!checkBrowserKey(request, env)) return json({ error: "bad key" }, 401);
+      if (!await checkBrowserAuth(request, env)) return json({ error: "login required" }, 401);
       const id = env.CODEX_ROOM.idFromName("default");
       const stub = env.CODEX_ROOM.get(id);
       // Switch protocol to WebSocket inside the DO
@@ -1932,7 +2184,7 @@ export default {
 
     // --- REST API ---------------------------------------------------------
     if (path.startsWith("/api/")) {
-      if (!checkBrowserKey(request, env)) return json({ error: "bad key" }, 401);
+      if (!await checkBrowserAuth(request, env)) return json({ error: "login required" }, 401);
       const id = env.CODEX_ROOM.idFromName("default");
       const stub = env.CODEX_ROOM.get(id);
 

@@ -16,4 +16,4 @@ new_sqlite_classes = ["CodexRoom"]
 
 # Optional: set via `wrangler secret put` instead of hard-coding.
 # [vars]
-# BROWSER_KEY = "change-me"
+# BROWSER_PASSWORD = "change-me"

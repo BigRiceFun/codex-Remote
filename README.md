@@ -47,7 +47,7 @@ Durable Object `CodexRoom`：
 
 ## WebSocket 协议
 
-### browser → worker (`/ws/client?key=...`)
+### browser → worker (`/ws/client`)
 ```json
 { "type": "hello" }
 { "type": "select", "session": "<id>" }      // 切换会话，触发回放缓冲
@@ -107,9 +107,9 @@ npm install
 npx wrangler secret put AGENT_TOKEN
 # 粘贴一个随机字符串，比如 64 位 hex
 
-# 可选：浏览器访问 key（留空则不启用，生产建议改用 Cloudflare Access）
-# 本地调试：在 wrangler.toml [vars] 里加 BROWSER_KEY = "xxx"
-#   或 `npx wrangler secret put BROWSER_KEY`
+# 可选：浏览器访问密码（留空则不启用，生产建议改用 Cloudflare Access）
+# 本地调试：在 wrangler.toml [vars] 里加 BROWSER_PASSWORD = "xxx"
+#   或 `npx wrangler secret put BROWSER_PASSWORD`
 
 npx wrangler deploy
 ```
@@ -148,10 +148,10 @@ $env:CODEX_WORKER      = "wss://codex-remote.<you>.workers.dev/ws/agent"
 https://codex-remote.<you>.workers.dev/
 ```
 
-如果配置了 `BROWSER_KEY`：
+如果配置了 `BROWSER_PASSWORD`，打开后会先进入登录页：
 
 ```
-https://codex-remote.<you>.workers.dev/?key=YOUR_KEY
+https://codex-remote.<you>.workers.dev/
 ```
 
 ---
@@ -171,7 +171,7 @@ cd agent && go run . -worker "ws://localhost:8787/ws/agent" -token "dev-token"
 
 ```
 AGENT_TOKEN=dev-token
-BROWSER_KEY=
+BROWSER_PASSWORD=
 ```
 
 浏览器开 `http://localhost:8787/`。
@@ -181,7 +181,7 @@ BROWSER_KEY=
 ## 安全说明
 
 - Agent → Worker：必须带 `token`（query 或 `X-Codex-Token`），和 Worker 的 `AGENT_TOKEN` secret 比对。
-- Browser → Worker：可选 `BROWSER_KEY`（query `?key=` 或 header `X-Codex-Key`）。**生产环境强烈建议用 Cloudflare Access**，不要把 key 到处分享。
+- Browser → Worker：可选 `BROWSER_PASSWORD`，通过登录页写入 HttpOnly Cookie。URL 不再使用 `?key=`。
 - 全链路 HTTPS/WSS。
 
 ---
