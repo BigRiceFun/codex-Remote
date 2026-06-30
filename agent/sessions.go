@@ -60,7 +60,24 @@ func listViaResumeCLI() ([]Session, error) {
 		}
 		list = append(list, s)
 	}
-	return list, nil
+	return enrichSessions(list), nil
+}
+
+func enrichSessions(list []Session) []Session {
+	for i := range list {
+		if list[i].CWD != "" {
+			continue
+		}
+		path := sessionFileByID(list[i].ID)
+		if path == "" {
+			continue
+		}
+		_, _, cwd := parseSessionHeader(path)
+		if cwd != "" {
+			list[i].CWD = cwd
+		}
+	}
+	return list
 }
 
 func codexDir() string {
@@ -205,7 +222,7 @@ func parseSessionHeader(path string) (string, string, string) {
 
 // HistoryItem is a single rendered chat message for the web view.
 type HistoryItem struct {
-	Role    string `json:"role"`              // "user" | "assistant"
+	Role    string `json:"role"` // "user" | "assistant"
 	Content string `json:"content"`
 }
 
@@ -356,5 +373,5 @@ func truncate(s string, n int) string {
 	if len(r) <= n {
 		return s
 	}
-	return string(r[:n-1]) + "…"
+	return string(r[:n-1]) + "..."
 }
