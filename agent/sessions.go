@@ -42,7 +42,7 @@ func listViaResumeCLI() ([]Session, error) {
 	if strings.HasPrefix(trimmed, "[") {
 		var parsed []Session
 		if err := json.Unmarshal([]byte(trimmed), &parsed); err == nil {
-			return parsed, nil
+			return enrichSessions(parsed), nil
 		}
 	}
 	var list []Session
@@ -65,16 +65,16 @@ func listViaResumeCLI() ([]Session, error) {
 
 func enrichSessions(list []Session) []Session {
 	for i := range list {
-		if list[i].CWD != "" {
-			continue
-		}
 		path := sessionFileByID(list[i].ID)
 		if path == "" {
 			continue
 		}
-		_, _, cwd := parseSessionHeader(path)
-		if cwd != "" {
+		_, title, cwd := parseSessionHeader(path)
+		if list[i].CWD == "" && cwd != "" {
 			list[i].CWD = cwd
+		}
+		if shouldReplaceSessionTitle(list[i].Title, list[i].ID) && title != "" {
+			list[i].Title = title
 		}
 	}
 	return list
@@ -201,7 +201,7 @@ func parseSessionHeader(path string) (string, string, string) {
 
 	br := bufio.NewReader(f)
 	cwd := ""
-	for i := 0; i < 80; i++ {
+	for i := 0; i < 200; i++ {
 		line, err := br.ReadString('\n')
 		if line != "" {
 			if cwd == "" {
@@ -309,6 +309,9 @@ func extractMessage(line string) (string, string) {
 		if strings.HasPrefix(t, "<") {
 			continue
 		}
+		if isInjectedInstructionText(t) {
+			continue
+		}
 		// skip Codex tool-call / tool-result wrappers
 		if strings.HasPrefix(t, "[external_agent_tool_call") ||
 			strings.HasPrefix(t, "[external_agent_tool_result") {
@@ -329,6 +332,24 @@ func extractUserTitle(line string) (string, bool) {
 		return "", false
 	}
 	return truncate(text, 80), true
+}
+
+func shouldReplaceSessionTitle(title, id string) bool {
+	title = strings.TrimSpace(title)
+	return title == "" || title == id || isInjectedInstructionText(title)
+}
+
+func isInjectedInstructionText(text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return false
+	}
+	head := text
+	if len(head) > 512 {
+		head = head[:512]
+	}
+	return strings.HasPrefix(head, "AGENTS.md instructions") ||
+		strings.Contains(head, "<INSTRUCTIONS>")
 }
 
 func extractUUID(s string) string {
