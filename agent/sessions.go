@@ -18,6 +18,7 @@ type Session struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
 	CWD   string `json:"cwd,omitempty"`
+	Time  string `json:"time,omitempty"` // "2026-06-12 21:44" parsed from filename
 }
 
 // ListSessions discovers Codex sessions: first try `codex resume --list`,
@@ -76,8 +77,65 @@ func enrichSessions(list []Session) []Session {
 		if shouldReplaceSessionTitle(list[i].Title, list[i].ID) && title != "" {
 			list[i].Title = title
 		}
+		if list[i].Time == "" {
+			list[i].Time = parseSessionTime(filepath.Base(path))
+		}
 	}
 	return list
+}
+
+// parseSessionTime extracts a "YYYY-MM-DD HH:MM" string from a filename like
+// rollout-2026-06-12T21-44-00-019ebc13-...jsonl. Returns "" if no match.
+func parseSessionTime(name string) string {
+	stem := strings.TrimSuffix(name, ".jsonl")
+	stem = strings.TrimSuffix(stem, ".json")
+	// Find the timestamp segment: 19 chars "YYYY-MM-DDTHH-MM-SS"
+	const tsLen = 19
+	idx := strings.Index(stem, "20")
+	if idx < 0 || idx+tsLen > len(stem) {
+		// fall back to UUIDv7 timestamp (first 48 bits = ms since epoch)
+		return parseUUIDv7Time(stem)
+	}
+	ts := stem[idx : idx+tsLen]
+	// "2026-06-12T21-44-00" -> "2026-06-12 21:44"
+	if len(ts) < 16 || ts[4] != '-' || ts[7] != '-' || ts[10] != 'T' || ts[13] != '-' {
+		return parseUUIDv7Time(stem)
+	}
+	return ts[:10] + " " + ts[11:16]
+}
+
+// parseUUIDv7Time tries to recover a timestamp from a UUIDv7 id (first 12 hex
+// chars = 48-bit ms timestamp). Returns "" on failure.
+func parseUUIDv7Time(stem string) string {
+	id := extractUUID(stem)
+	if id == "" {
+		return ""
+	}
+	hex := strings.ReplaceAll(id[:13], "-", "")
+	if len(hex) < 12 {
+		return ""
+	}
+	var ms int64
+	for i := 0; i < 12; i++ {
+		c := hex[i]
+		var v int64
+		switch {
+		case c >= '0' && c <= '9':
+			v = int64(c - '0')
+		case c >= 'a' && c <= 'f':
+			v = int64(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			v = int64(c-'A') + 10
+		default:
+			return ""
+		}
+		ms = ms*16 + v
+	}
+	t := time.Unix(0, ms*int64(time.Millisecond))
+	if t.Year() < 2020 {
+		return ""
+	}
+	return t.Format("2006-01-02 15:04")
 }
 
 func codexDir() string {
@@ -118,10 +176,15 @@ func listViaFilesystem() []Session {
 		if id == "" {
 			continue
 		}
-		sessions = append(sessions, Session{ID: id, Title: title, CWD: cwd})
+		sessions = append(sessions, Session{
+			ID:    id,
+			Title: title,
+			CWD:   cwd,
+			Time:  parseSessionTime(filepath.Base(f)),
+		})
 	}
 	sort.Slice(sessions, func(i, j int) bool {
-		return sessions[i].ID > sessions[j].ID
+		return sessions[i].Time > sessions[j].Time
 	})
 	return sessions
 }

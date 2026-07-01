@@ -483,6 +483,7 @@ const HTML_PAGE = String.raw`<!doctype html>
     flex: 1;
     min-height: 0;
     overflow: hidden;
+    position: relative;
   }
   .messages {
     height: 100%;
@@ -491,6 +492,61 @@ const HTML_PAGE = String.raw`<!doctype html>
     display: flex;
     flex-direction: column;
     gap: 16px;
+  }
+  .unread-pill {
+    position: absolute;
+    left: 50%;
+    bottom: 12px;
+    transform: translateX(-50%);
+    height: 32px;
+    padding: 0 14px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    box-shadow: 0 4px 16px rgba(0,0,0,.25);
+    z-index: 30;
+    transition: background var(--transition), color var(--transition);
+  }
+  .unread-pill:hover {
+    background: var(--hover);
+  }
+  .bubble-copy {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    height: 24px;
+    padding: 0 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--card) 92%, var(--bg));
+    color: var(--text-secondary);
+    font-size: 11px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity var(--transition), background var(--transition), color var(--transition);
+    z-index: 5;
+  }
+  .message-shell:hover .bubble-copy,
+  .bubble-copy:focus-visible {
+    opacity: 1;
+  }
+  .bubble-copy:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
+  .bubble-copy.copied {
+    color: var(--success);
+    border-color: var(--success-border);
+    opacity: 1;
+  }
+  @media (hover: none) {
+    .bubble-copy { opacity: 1; }
   }
   .row {
     display: flex;
@@ -1067,6 +1123,7 @@ const HTML_PAGE = String.raw`<!doctype html>
     </div>
     <div class="messages-panel">
       <div class="messages" id="messages"><div class="empty">选择一个会话开始</div></div>
+      <button id="unreadPill" class="unread-pill" type="button" style="display:none"></button>
     </div>
     <div class="composer-wrap">
       <div class="queue" id="queue" style="display:none"></div>
@@ -1115,19 +1172,19 @@ const HTML_PAGE = String.raw`<!doctype html>
       </div>
     </div>
     <div class="panel-card">
-      <div class="panel-title">快捷键</div>
+      <div class="panel-title">活动</div>
       <div class="panel-grid">
         <div class="panel-row">
-          <div class="panel-row-label">发送</div>
-          <div class="panel-row-value code">Enter</div>
+          <div class="panel-row-label">开始时间</div>
+          <div id="panelStarted" class="panel-row-value code">-</div>
         </div>
         <div class="panel-row">
-          <div class="panel-row-label">换行</div>
-          <div class="panel-row-value code">Shift + Enter</div>
+          <div class="panel-row-label">消息数</div>
+          <div id="panelMsgCount" class="panel-row-value">0 条</div>
         </div>
         <div class="panel-row">
-          <div class="panel-row-label">侧边栏</div>
-          <div class="panel-row-value code">侧边栏按钮</div>
+          <div class="panel-row-label">最近活动</div>
+          <div id="panelLastActivity" class="panel-row-value">-</div>
         </div>
       </div>
     </div>
@@ -1150,6 +1207,8 @@ let connected = false;
 let sidebarQuery = '';
 let lastStatus = { running: false, current: null, owner: null, queue: [] };
 const collapsedGroups = {};
+let currentSessionMsgCount = 0;
+let lastActivityAt = 0;
 
 const $ = id => document.getElementById(id);
 const sidebar = $('sidebar');
@@ -1416,7 +1475,7 @@ function renderOfflineSidebar() {
 
 function renderSessionItem(s) {
   const title = escapeHtml(s.title || s.id);
-  const time = escapeHtml(formatSessionTime(s.id));
+  const time = escapeHtml(s.time || formatSessionTime(s.id));
   const running = !!(lastStatus.running && lastStatus.current === s.id);
   const active = s.id === currentSession;
   return '<div class="' + (active ? 'conversation-item active' : 'conversation-item') + (running ? ' running' : '') + '" data-id="' + s.id + '" title="' + title + '">' +
@@ -1506,7 +1565,36 @@ function renderInfoPanel() {
   $('panelSessionPath').textContent = s ? (s.cwd || '-') : '-';
   $('panelRunState').textContent = lastStatus.running ? '运行中' : '空闲';
   $('panelQueue').textContent = formatQueueCount((lastStatus.queue || []).length);
+  renderActivityPanel();
 }
+
+function renderActivityPanel() {
+  const s = sessions.find(x => x.id === currentSession);
+  $('panelStarted').textContent = s && s.time ? s.time : '-';
+  $('panelMsgCount').textContent = currentSessionMsgCount + ' 条';
+  $('panelLastActivity').textContent = formatRelativeTime(lastActivityAt);
+}
+
+function formatRelativeTime(ts) {
+  if (!ts) return '-';
+  const diff = Math.max(0, Date.now() - ts);
+  const sec = Math.floor(diff / 1000);
+  if (sec < 5) return '刚刚';
+  if (sec < 60) return sec + ' 秒前';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return min + ' 分钟前';
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return hr + ' 小时前';
+  const day = Math.floor(hr / 24);
+  return day + ' 天前';
+}
+
+// Tick the "last activity" relative time once a minute so it stays fresh.
+setInterval(() => {
+  if (currentSession && lastActivityAt) {
+    $('panelLastActivity').textContent = formatRelativeTime(lastActivityAt);
+  }
+}, 30000);
 
 function formatQueueCount(n) {
   return (n || 0) + ' 项';
@@ -1550,12 +1638,56 @@ function selectSession(id) {
     collapsedGroups[key] = false;
   }
   messages.innerHTML = '';
+  closeStreamingBubble();
+  clearThinking();
+  unreadCount = 0;
+  updateUnreadPill();
+  currentSessionMsgCount = 0;
+  lastActivityAt = 0;
   setChatHeader(id);
   renderSidebar(sessions);
   updateComposerState();
   send({ type: 'select', session: id });
   if (window.matchMedia('(max-width: 900px)').matches) { sidebarClose(); infoClose(); }
 }
+
+// Scroll lock: only auto-scroll to bottom when the user is already near it.
+// If they've scrolled up to read history, queue new messages and show a
+// "new messages" pill instead of yanking them down.
+let unreadCount = 0;
+function isNearBottom() {
+  return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 80;
+}
+function scrollToBottom() {
+  messages.scrollTop = messages.scrollHeight;
+}
+function appendRow(row) {
+  if (messages.firstChild && messages.firstChild.className === 'empty') messages.innerHTML = '';
+  const nearBottom = isNearBottom();
+  messages.appendChild(row);
+  if (nearBottom) {
+    scrollToBottom();
+  } else {
+    unreadCount++;
+    updateUnreadPill();
+  }
+}
+function updateUnreadPill() {
+  const pill = $('unreadPill');
+  if (!pill) return;
+  if (unreadCount > 0) {
+    pill.style.display = 'inline-flex';
+    pill.textContent = unreadCount + ' 条新消息';
+  } else {
+    pill.style.display = 'none';
+  }
+}
+messages.addEventListener('scroll', () => {
+  if (isNearBottom()) {
+    unreadCount = 0;
+    updateUnreadPill();
+  }
+});
 
 function appendMessage(kind, text) {
   if (isNoise(text)) return;
@@ -1575,12 +1707,88 @@ function appendMessage(kind, text) {
   bubble.className = 'bubble ' + kind;
   bubble.dataset.raw = text;
   bubble.innerHTML = renderMessageContent(kind, text);
+  attachBubbleActions(shell, kind, text);
   shell.appendChild(meta);
   shell.appendChild(bubble);
   row.appendChild(shell);
-  if (messages.firstChild && messages.firstChild.className === 'empty') messages.innerHTML = '';
-  messages.appendChild(row);
-  messages.scrollTop = messages.scrollHeight;
+  appendRow(row);
+  if (kind === 'user' || kind === 'agent') {
+    currentSessionMsgCount++;
+    lastActivityAt = Date.now();
+    renderActivityPanel();
+  }
+}
+
+// Live streaming: accumulate stream lines into a single agent bubble until
+// codex exits. This keeps multi-line markdown (code blocks, lists, tables)
+// intact instead of fragmentating into one bubble per line.
+let streamingBubbleEl = null;
+let streamingBubbleCounted = false;
+function appendStreamLine(text) {
+  if (isNoise(text)) return;
+  if (!streamingBubbleEl || !streamingBubbleEl.parentNode) {
+    const row = document.createElement('div');
+    row.className = 'row agent';
+    const shell = document.createElement('div');
+    shell.className = 'message-shell';
+    const meta = document.createElement('div');
+    meta.className = 'message-meta';
+    meta.textContent = messageLabel('agent');
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble agent';
+    bubble.dataset.raw = '';
+    bubble.innerHTML = '';
+    attachBubbleActions(shell, 'agent', '');
+    shell.appendChild(meta);
+    shell.appendChild(bubble);
+    row.appendChild(shell);
+    appendRow(row);
+    streamingBubbleEl = bubble;
+    streamingBubbleCounted = false;
+  }
+  const raw = (streamingBubbleEl.dataset.raw || '');
+  const next = raw ? raw + '\n' + text : text;
+  streamingBubbleEl.dataset.raw = next;
+  streamingBubbleEl.innerHTML = renderMarkdown(next);
+  lastActivityAt = Date.now();
+  if (!streamingBubbleCounted) {
+    currentSessionMsgCount++;
+    streamingBubbleCounted = true;
+    renderActivityPanel();
+  } else if (isNearBottom()) {
+    scrollToBottom();
+  }
+}
+
+function closeStreamingBubble() {
+  streamingBubbleEl = null;
+  streamingBubbleCounted = false;
+}
+
+// #7 copy-message button: a small affordance shown on hover. Uses event
+// delegation on the messages container so it works for streaming bubbles too.
+function attachBubbleActions(shell, kind, raw) {
+  if (kind !== 'agent' && kind !== 'user') return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'bubble-copy';
+  btn.textContent = '复制';
+  btn.title = '复制消息';
+  btn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const bubble = shell.querySelector('.bubble');
+    const text = bubble ? (bubble.dataset.raw || raw) : raw;
+    if (!text || !navigator.clipboard) return;
+    await navigator.clipboard.writeText(text);
+    btn.classList.add('copied');
+    btn.textContent = '已复制';
+    setTimeout(() => {
+      btn.classList.remove('copied');
+      btn.textContent = '复制';
+    }, 1200);
+  });
+  shell.style.position = 'relative';
+  shell.appendChild(btn);
 }
 
 let thinkingEl = null;
@@ -1600,9 +1808,7 @@ function showThinking() {
   shell.appendChild(b);
   row.appendChild(shell);
   thinkingEl = row;
-  if (messages.firstChild && messages.firstChild.className === 'empty') messages.innerHTML = '';
-  messages.appendChild(row);
-  messages.scrollTop = messages.scrollHeight;
+  appendRow(row);
 }
 function clearThinking() {
   if (thinkingEl && thinkingEl.parentNode) {
@@ -1804,7 +2010,7 @@ function connect() {
       case 'stream':
         if (m.session === currentSession) {
           clearThinking();
-          appendMessage('agent', m.content);
+          appendStreamLine(m.content);
         }
         break;
       case 'user':
@@ -1818,8 +2024,13 @@ function connect() {
         break;
       case 'system':
         if (m.session === currentSession || !m.session) {
-          if (m.content === 'codex started') showThinking();
-          else if (m.content === 'codex exited' || /exited/.test(m.content)) clearThinking();
+          if (m.content === 'codex started') {
+            closeStreamingBubble();
+            showThinking();
+          } else if (m.content === 'codex exited' || /exited/.test(m.content)) {
+            closeStreamingBubble();
+            clearThinking();
+          }
           appendMessage('system', m.content);
         }
         break;
@@ -1878,6 +2089,12 @@ messages.addEventListener('click', async e => {
 
 autoResizeInput();
 updateComposerState();
+
+$('unreadPill').addEventListener('click', () => {
+  unreadCount = 0;
+  updateUnreadPill();
+  scrollToBottom();
+});
 connect();
 </script>
 </body>
