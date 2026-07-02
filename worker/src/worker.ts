@@ -760,6 +760,47 @@ const HTML_PAGE = String.raw`<!doctype html>
     color: var(--warning-text);
     font-size: 12px;
   }
+  .approval-bar {
+    display: none;
+    margin: 12px 0 0;
+    padding: 12px;
+    border: 1px solid var(--warning-border);
+    border-radius: 10px;
+    background: var(--warning-soft);
+    color: var(--text);
+  }
+  .approval-bar.show {
+    display: block;
+  }
+  .approval-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--warning-text);
+  }
+  .approval-content {
+    margin-top: 6px;
+    color: var(--text-secondary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .approval-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .approval-actions .btn {
+    height: 30px;
+    border-radius: 8px;
+  }
+  .approval-deny {
+    color: var(--error-text);
+    border-color: color-mix(in srgb, var(--error) 35%, transparent);
+  }
   .composer {
     margin-top: 12px;
     border: 1px solid var(--border);
@@ -1127,6 +1168,15 @@ const HTML_PAGE = String.raw`<!doctype html>
     </div>
     <div class="composer-wrap">
       <div class="queue" id="queue" style="display:none"></div>
+      <div class="approval-bar" id="approvalBar">
+        <div class="approval-title">Codex 请求权限</div>
+        <div class="approval-content" id="approvalContent"></div>
+        <div class="approval-actions">
+          <button class="btn btn-primary" type="button" data-approval="allow_once">允许</button>
+          <button class="btn" type="button" data-approval="allow_always">允许这一类所有</button>
+          <button class="btn approval-deny" type="button" data-approval="deny">拒绝</button>
+        </div>
+      </div>
       <div class="composer">
         <textarea id="input" placeholder="输入消息..."></textarea>
         <div class="composer-footer">
@@ -1209,6 +1259,7 @@ let lastStatus = { running: false, current: null, owner: null, queue: [] };
 const collapsedGroups = {};
 let currentSessionMsgCount = 0;
 let lastActivityAt = 0;
+let pendingApproval = null;
 
 const $ = id => document.getElementById(id);
 const sidebar = $('sidebar');
@@ -1217,6 +1268,8 @@ const inputEl = $('input');
 const sendBtn = $('sendBtn');
 const debugEl = $('debug');
 const searchInput = $('searchInput');
+const approvalBar = $('approvalBar');
+const approvalContent = $('approvalContent');
 const debugLog = [];
 
 const ICONS = {
@@ -1644,11 +1697,38 @@ function selectSession(id) {
   updateUnreadPill();
   currentSessionMsgCount = 0;
   lastActivityAt = 0;
+  clearApproval();
   setChatHeader(id);
   renderSidebar(sessions);
   updateComposerState();
   send({ type: 'select', session: id });
   if (window.matchMedia('(max-width: 900px)').matches) { sidebarClose(); infoClose(); }
+}
+
+function showApproval(session, content) {
+  pendingApproval = { session, content };
+  if (session !== currentSession) return;
+  approvalContent.textContent = content || 'Codex 正在等待权限确认';
+  approvalBar.classList.add('show');
+}
+
+function clearApproval() {
+  pendingApproval = null;
+  approvalBar.classList.remove('show');
+  approvalContent.textContent = '';
+}
+
+function submitApproval(decision) {
+  if (!pendingApproval || !currentSession) return;
+  send({ type: 'approval', session: pendingApproval.session || currentSession, decision });
+  appendMessage('system', approvalLabel(decision));
+  clearApproval();
+}
+
+function approvalLabel(decision) {
+  if (decision === 'allow_once') return '已允许本次权限请求';
+  if (decision === 'allow_always') return '已允许这一类权限请求';
+  return '已拒绝权限请求';
 }
 
 // Scroll lock: only auto-scroll to bottom when the user is already near it.
@@ -2013,6 +2093,13 @@ function connect() {
           appendStreamLine(m.content);
         }
         break;
+      case 'approval':
+        if (m.session === currentSession) {
+          closeStreamingBubble();
+          clearThinking();
+          showApproval(m.session, m.content);
+        }
+        break;
       case 'user':
         if (m.session === currentSession) appendMessage('user', m.content);
         break;
@@ -2030,6 +2117,7 @@ function connect() {
           } else if (m.content === 'codex exited' || /exited/.test(m.content)) {
             closeStreamingBubble();
             clearThinking();
+            clearApproval();
           }
           appendMessage('system', m.content);
         }
@@ -2056,6 +2144,12 @@ searchInput.addEventListener('input', e => {
   sidebarQuery = String(e.target.value || '').trim().toLowerCase();
   if (connected) renderSidebar(sessions);
   else renderOfflineSidebar();
+});
+
+approvalBar.addEventListener('click', e => {
+  const btn = e.target.closest('[data-approval]');
+  if (!btn) return;
+  submitApproval(btn.dataset.approval || '');
 });
 
 sendBtn.onclick = () => {
@@ -2417,5 +2511,3 @@ export default {
     return new Response("Not Found", { status: 404 });
   },
 };
-
-

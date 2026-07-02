@@ -147,6 +147,9 @@ export class CodexRoom {
       case "send":
         this.handleSend(String(m.session || ""), String(m.text || ""), conn);
         break;
+      case "approval":
+        this.handleApproval(String(m.session || ""), String(m.decision || ""));
+        break;
     }
   }
 
@@ -195,6 +198,7 @@ export class CodexRoom {
       }
       case "system":
       case "error":
+      case "approval":
         this.broadcast({ type: m.type, session: m.session || null, content: String(m.content || "") });
         break;
       default:
@@ -214,6 +218,12 @@ export class CodexRoom {
     // Broadcast once to every client (including sender) so all tabs see it.
     this.broadcast({ type: "input_echo", session, content: text });
     return json({ ok: true });
+  }
+
+  handleApproval(session: string, decision: string) {
+    if (!this.agent) return;
+    if (!session || !decision) return;
+    this.sendTo(this.agent.ws, { type: "approval", session, decision });
   }
 
   // ----------------------------- helpers -----------------------------------

@@ -190,5 +190,5 @@ BROWSER_PASSWORD=
 
 - 每个 Worker 只有一个 `default` 房间（所有 browser 共享一个 agent）。多用户隔离时换成按用户 ID 分房间。
 - Agent 单条 stdout 行即一条 stream 消息，不做 token 级流式（Codex CLI 本身就是按行）。
-- 审批 (approval) 功能未单独实现：codex 的 `[y/n]` 提示会以 stream 形式显示，用户在输入框里打 `y` 回车即可（走 `send` → 交给 Engine.PumpStdin 或排队）。如果需要显式审批 UI，可在 Engine 里识别 stdout 中的 `Allow command?` 并发 `type:"approval"` 消息。
+- 审批 (approval)：agent 会识别 Codex 的权限提示并发送 `type:"approval"`，页面显示“允许 / 允许这一类所有 / 拒绝”，选择后通过 stdin 回写给当前 Codex 进程。
 - 没有数据库；Durable Object 内存即所有状态，重启会丢历史（但 codex 会话文件仍在 `~/.codex`）。

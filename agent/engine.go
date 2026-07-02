@@ -21,6 +21,7 @@ type Engine struct {
 	currentSession string
 	running        bool
 	cmd            *exec.Cmd
+	stdin          io.WriteCloser
 	cancel         context.CancelFunc
 	queue          []queueItem
 
@@ -143,7 +144,11 @@ func (e *Engine) start(session, text string) {
 		return
 	}
 	cmd.Stderr = cmd.Stdout
-	cmd.Stdin = nil
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		e.failStart(session, "stdin pipe: "+err.Error(), cancel)
+		return
+	}
 
 	if err := cmd.Start(); err != nil {
 		e.failStart(session, "start: "+err.Error(), cancel)
@@ -152,6 +157,7 @@ func (e *Engine) start(session, text string) {
 
 	e.mu.Lock()
 	e.cmd = cmd
+	e.stdin = stdin
 	e.cancel = cancel
 	e.currentSession = session
 	e.running = true
@@ -170,7 +176,7 @@ func (e *Engine) start(session, text string) {
 		//   "codex"           -> start of agent role (drop the marker itself)
 		//   anything else     -> real content, stream it
 		const (
-			stInit = iota
+			stInit       = iota
 			stInUserEcho // inside user block, skip
 		)
 		state := stInit
@@ -205,6 +211,10 @@ func (e *Engine) start(session, text string) {
 				if clean == last {
 					continue
 				}
+				if isApprovalPrompt(clean) {
+					e.agent.emit(AgentOutgoing{Type: "approval", Session: session, Content: clean})
+					continue
+				}
 				e.agent.emit(AgentOutgoing{Type: "stream", Session: session, Content: clean})
 			}
 			if err != nil {
@@ -220,6 +230,10 @@ func (e *Engine) onProcessEnd(session string, waitErr error) {
 	e.mu.Lock()
 	e.running = false
 	e.cmd = nil
+	if e.stdin != nil {
+		_ = e.stdin.Close()
+		e.stdin = nil
+	}
 	if e.cancel != nil {
 		e.cancel()
 		e.cancel = nil
@@ -252,9 +266,51 @@ func (e *Engine) onProcessEnd(session string, waitErr error) {
 	}
 }
 
-// PumpStdin is a no-op for non-interactive exec mode; kept for API compatibility.
+func isApprovalPrompt(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	return strings.Contains(lower, "allow command") ||
+		strings.Contains(lower, "allow this command") ||
+		strings.Contains(lower, "approve command") ||
+		strings.Contains(lower, "approval required") ||
+		strings.Contains(lower, "requires approval")
+}
+
+func (e *Engine) RespondApproval(session, decision string) error {
+	input := approvalInput(decision)
+	if input == "" {
+		return fmt.Errorf("unknown approval decision: %s", decision)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.running || e.currentSession != session || e.stdin == nil {
+		return fmt.Errorf("no running approval target")
+	}
+	_, err := io.WriteString(e.stdin, input+"\n")
+	return err
+}
+
+func approvalInput(decision string) string {
+	switch decision {
+	case "allow", "allow_once", "yes":
+		return "y"
+	case "allow_always", "always":
+		return "a"
+	case "deny", "no":
+		return "n"
+	default:
+		return ""
+	}
+}
+
+// PumpStdin is only used for explicit interactive approval responses.
 func (e *Engine) PumpStdin(line string) error {
-	return fmt.Errorf("non-interactive mode; message is auto-queued")
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stdin == nil {
+		return fmt.Errorf("stdin is not available")
+	}
+	_, err := io.WriteString(e.stdin, line+"\n")
+	return err
 }
 
 func (e *Engine) publishStatus() {
@@ -397,6 +453,12 @@ func (e *Engine) HandleIncoming(raw []byte) {
 	switch m.Type {
 	case "send":
 		e.EnqueueOrStart(m.Session, m.Text, "web")
+	case "approval":
+		if err := e.RespondApproval(m.Session, m.Decision); err != nil {
+			e.agent.emit(AgentOutgoing{Type: "error", Session: m.Session, Content: "approval: " + err.Error()})
+		} else {
+			e.agent.emit(AgentOutgoing{Type: "system", Session: m.Session, Content: "approval sent: " + m.Decision})
+		}
 	case "history":
 		// worker is asking us to replay chat history for a session
 		items := ReadHistory(m.Session)

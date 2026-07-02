@@ -19,7 +19,8 @@ type StatusPayload struct {
 
 // WorkerIncoming are messages worker -> agent.
 type WorkerIncoming struct {
-	Type    string `json:"type"`
-	Session string `json:"session"`
-	Text    string `json:"text"`
+	Type     string `json:"type"`
+	Session  string `json:"session"`
+	Text     string `json:"text"`
+	Decision string `json:"decision,omitempty"`
 }
