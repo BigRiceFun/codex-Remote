@@ -4,6 +4,7 @@ interface ClientConn {
   kind: "client";
   ws: WebSocket;
   id: number;
+  selectedSession: string;
 }
 interface AgentConn {
   kind: "agent";
@@ -19,6 +20,12 @@ interface StatusPayload {
   queue: string[];
 }
 
+interface LoginAttemptState {
+  count: number;
+  blockedUntil: number;
+  lastAttempt: number;
+}
+
 export class CodexRoom {
   state: DurableObjectState;
   env: unknown;
@@ -30,6 +37,8 @@ export class CodexRoom {
   sessions: Array<{ id: string; title: string }> = [];
   status: StatusPayload = { running: false, current: null, owner: null, queue: [] };
   bufferedStreams: Map<string, string[]> = new Map(); // session -> recent lines
+  approvalRequests: Map<string, { clientId: number; session: string; content: string; responded: boolean }> = new Map();
+  historyRequests: Map<string, number> = new Map();
 
   constructor(state: DurableObjectState, env: unknown) {
     this.state = state;
@@ -47,6 +56,9 @@ export class CodexRoom {
 
     if (path === "/api/sessions") return json({ sessions: this.sessions, online: !!this.agent });
     if (path === "/api/status")   return json({ status: this.status, online: !!this.agent });
+    if (path === "/auth/login-attempt" && request.method === "POST") {
+      return this.handleLoginAttempt(request);
+    }
     if (path === "/api/send") {
       const body = await request.json() as { session?: string; text?: string };
       return this.handleSend(body.session ?? "", body.text ?? "");
@@ -66,12 +78,12 @@ export class CodexRoom {
     serverSide.accept();
 
     const id = this.nextClientId++;
-    const conn: ClientConn = { kind: "client", ws: serverSide, id };
+    const conn: ClientConn = { kind: "client", ws: serverSide, id, selectedSession: "" };
     this.clients.set(id, conn);
 
     serverSide.addEventListener("message", (ev: MessageEvent) => this.onClientMessage(conn, ev.data));
-    serverSide.addEventListener("close", () => { this.clients.delete(id); });
-    serverSide.addEventListener("error", () => { this.clients.delete(id); });
+    serverSide.addEventListener("close", () => { this.removeClient(id); });
+    serverSide.addEventListener("error", () => { this.removeClient(id); });
 
     // send hello on the server side (will be delivered to the browser)
     this.sendTo(serverSide, {
@@ -100,6 +112,7 @@ export class CodexRoom {
     serverSide.accept();
 
     this.agent = { kind: "agent", ws: serverSide };
+    this.syncWatchedSessions();
 
     serverSide.addEventListener("message", (ev: MessageEvent) => this.onAgentMessage(ev.data));
     serverSide.addEventListener("close", () => {
@@ -116,6 +129,7 @@ export class CodexRoom {
 
   // ----------------------------- Client messages ---------------------------
   onClientMessage(conn: ClientConn, raw: unknown) {
+    if (typeof raw !== "string" || raw.length > 70 * 1024) return;
     let m: any;
     try { m = JSON.parse(typeof raw === "string" ? raw : ""); } catch { return; }
     if (!m || typeof m !== "object") return;
@@ -131,24 +145,39 @@ export class CodexRoom {
         break;
       case "select": {
         const id = String(m.session || "");
+        conn.selectedSession = id;
+        this.syncWatchedSessions();
+        this.restorePendingApproval(conn, id);
+        const requestId = crypto.randomUUID();
         this.sendTo(conn.ws, { type: "system", session: id, content: "--- history ---" });
         // Tell the agent which session this client is viewing, so it can tail
         // only that jsonl instead of scanning everything.
         if (this.agent) {
-          this.sendTo(this.agent.ws, { type: "watch", session: id });
-          // Ask for history replay as well.
-          this.sendTo(this.agent.ws, { type: "history", session: id });
+          this.historyRequests.set(requestId, conn.id);
+          this.sendTo(this.agent.ws, { type: "history", session: id, requestId });
         } else {
           this.sendTo(conn.ws, { type: "system", session: id, content: "(agent offline)" });
           this.sendTo(conn.ws, { type: "system", session: id, content: "--- end ---" });
         }
         break;
       }
+      case "subscribe": {
+        const id = String(m.session || "");
+        conn.selectedSession = id;
+        this.syncWatchedSessions();
+        this.restorePendingApproval(conn, id);
+        break;
+      }
       case "send":
         this.handleSend(String(m.session || ""), String(m.text || ""), conn);
         break;
       case "approval":
-        this.handleApproval(String(m.session || ""), String(m.decision || ""));
+        this.handleApproval(
+          conn,
+          String(m.session || ""),
+          String(m.approvalId || ""),
+          String(m.decision || ""),
+        );
         break;
     }
   }
@@ -192,13 +221,42 @@ export class CodexRoom {
           const role = parts[0];
           const text = parts[1];
           // Agent packs role as "user" or "agent" (we renamed assistant->agent).
-          this.broadcast({ type: role === "agent" ? "agent" : "user", session, content: text });
+          const target = this.clients.get(this.historyRequests.get(String(m.requestId || "")) || -1);
+          if (target) this.sendTo(target.ws, { type: role === "agent" ? "agent" : "user", session, content: text });
+        }
+        break;
+      }
+      case "history_end": {
+        const requestId = String(m.requestId || "");
+        const target = this.clients.get(this.historyRequests.get(requestId) || -1);
+        if (target) this.sendTo(target.ws, { type: "system", session: m.session || null, content: "--- end ---" });
+        this.historyRequests.delete(requestId);
+        break;
+      }
+      case "approval": {
+        const session = String(m.session || "");
+        const approvalId = String(m.approvalId || "");
+        if (!session || !approvalId) break;
+        const requestedClientId = Number(m.clientId);
+        const target = this.clients.get(requestedClientId) ||
+          (m.clientId === "api" ? this.clients.values().next().value as ClientConn | undefined : undefined);
+        const content = String(m.content || "");
+        this.approvalRequests.set(approvalId, { clientId: target?.id || 0, session, content, responded: false });
+        if (target) this.sendTo(target.ws, { type: "approval", session, approvalId, content });
+        break;
+      }
+      case "approval_result": {
+        const approvalId = String(m.approvalId || "");
+        const pending = this.approvalRequests.get(approvalId);
+        if (pending) {
+          const target = this.clients.get(pending.clientId);
+          if (target) this.sendTo(target.ws, m);
+          this.approvalRequests.delete(approvalId);
         }
         break;
       }
       case "system":
       case "error":
-      case "approval":
         this.broadcast({ type: m.type, session: m.session || null, content: String(m.content || "") });
         break;
       default:
@@ -213,17 +271,85 @@ export class CodexRoom {
   async handleSend(session: string, text: string, fromClient?: ClientConn) {
     if (!this.agent) return json({ error: "agent offline" }, 503);
     if (!session || !text) return json({ error: "session/text required" }, 400);
+    if (text.length > 64 * 1024) return json({ error: "message too large" }, 413);
+    if (!this.sessions.some(item => item.id === session)) return json({ error: "unknown session" }, 404);
 
-    this.sendTo(this.agent.ws, { type: "send", session, text });
+    this.sendTo(this.agent.ws, { type: "send", session, text, clientId: fromClient ? String(fromClient.id) : "api" });
     // Broadcast once to every client (including sender) so all tabs see it.
     this.broadcast({ type: "input_echo", session, content: text });
     return json({ ok: true });
   }
 
-  handleApproval(session: string, decision: string) {
+  handleApproval(conn: ClientConn, session: string, approvalId: string, decision: string) {
     if (!this.agent) return;
-    if (!session || !decision) return;
-    this.sendTo(this.agent.ws, { type: "approval", session, decision });
+    if (!session || !approvalId || !["allow_once", "allow_always", "deny"].includes(decision)) return;
+    const pending = this.approvalRequests.get(approvalId);
+    if (!pending || pending.responded || pending.clientId !== conn.id || pending.session !== session) return;
+    pending.responded = true;
+    this.sendTo(this.agent.ws, { type: "approval", session, approvalId, decision });
+  }
+
+  removeClient(id: number) {
+    this.clients.delete(id);
+    for (const [approvalId, approval] of this.approvalRequests) {
+      if (approval.clientId === id && !approval.responded) {
+        approval.clientId = 0;
+        this.approvalRequests.set(approvalId, approval);
+      }
+    }
+    for (const [requestId, clientId] of this.historyRequests) {
+      if (clientId === id) this.historyRequests.delete(requestId);
+    }
+    this.syncWatchedSessions();
+  }
+
+  syncWatchedSessions() {
+    if (!this.agent) return;
+    const sessions = [...new Set([...this.clients.values()].map(client => client.selectedSession).filter(Boolean))];
+    this.sendTo(this.agent.ws, { type: "watch", sessions });
+  }
+
+  restorePendingApproval(conn: ClientConn, session: string) {
+    for (const [approvalId, approval] of this.approvalRequests) {
+      if (approval.session !== session || approval.responded || approval.clientId !== 0) continue;
+      approval.clientId = conn.id;
+      this.approvalRequests.set(approvalId, approval);
+      this.sendTo(conn.ws, { type: "approval", session, approvalId, content: approval.content });
+      break;
+    }
+  }
+
+  async handleLoginAttempt(request: Request): Promise<Response> {
+    const body = await request.json() as { ip?: string; success?: boolean };
+    const ip = String(body.ip || "unknown").slice(0, 128);
+    const success = body.success === true;
+    const key = `login:${ip}`;
+    const now = Date.now();
+    let result = { allowed: true, retryAfter: 0 };
+
+    await this.state.storage.transaction(async txn => {
+      const state = await txn.get<LoginAttemptState>(key) || { count: 0, blockedUntil: 0, lastAttempt: 0 };
+      if (state.blockedUntil > now) {
+        result = { allowed: false, retryAfter: Math.ceil((state.blockedUntil - now) / 1000) };
+        return;
+      }
+      if (state.blockedUntil > 0 || now - state.lastAttempt > 15 * 60 * 1000) {
+        state.count = 0;
+        state.blockedUntil = 0;
+      }
+      if (success) {
+        await txn.delete(key);
+        return;
+      }
+      state.count += 1;
+      state.lastAttempt = now;
+      if (state.count >= 5) {
+        state.blockedUntil = now + 15 * 60 * 1000;
+        result = { allowed: false, retryAfter: 15 * 60 };
+      }
+      await txn.put(key, state);
+    });
+    return json(result, result.allowed ? 200 : 429);
   }
 
   // ----------------------------- helpers -----------------------------------

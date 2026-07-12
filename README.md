@@ -54,7 +54,7 @@ Durable Object `CodexRoom`：
 { "type": "send",   "session": "<id>", "text": "..." }
 ```
 
-### agent → worker (`/ws/agent?token=...`)
+### agent → worker (`/ws/agent`，token 通过 `X-Codex-Token` 请求头传递)
 ```json
 { "type": "sessions", "sessions": [{ "id": "...", "title": "..." }] }
 { "type": "status",   "status":  { "running": true, "current": "abc", "owner": "web", "queue": [] } }
@@ -107,9 +107,8 @@ npm install
 npx wrangler secret put AGENT_TOKEN
 # 粘贴一个随机字符串，比如 64 位 hex
 
-# 可选：浏览器访问密码（留空则不启用，生产建议改用 Cloudflare Access）
-# 本地调试：在 wrangler.toml [vars] 里加 BROWSER_PASSWORD = "xxx"
-#   或 `npx wrangler secret put BROWSER_PASSWORD`
+# 设置浏览器访问密码（生产环境必填，未配置时 Worker 默认拒绝访问）
+npx wrangler secret put BROWSER_PASSWORD
 
 npx wrangler deploy
 ```
@@ -148,7 +147,7 @@ $env:CODEX_WORKER      = "wss://codex-remote.<you>.workers.dev/ws/agent"
 https://codex-remote.<you>.workers.dev/
 ```
 
-如果配置了 `BROWSER_PASSWORD`，打开后会先进入登录页：
+打开后会先进入登录页：
 
 ```
 https://codex-remote.<you>.workers.dev/
@@ -171,7 +170,9 @@ cd agent && go run . -worker "ws://localhost:8787/ws/agent" -token "dev-token"
 
 ```
 AGENT_TOKEN=dev-token
-BROWSER_PASSWORD=
+BROWSER_PASSWORD=dev-password
+# 仅在明确需要无密码本地调试时使用：
+# ALLOW_UNAUTHENTICATED=true
 ```
 
 浏览器开 `http://localhost:8787/`。
@@ -180,8 +181,8 @@ BROWSER_PASSWORD=
 
 ## 安全说明
 
-- Agent → Worker：必须带 `token`（query 或 `X-Codex-Token`），和 Worker 的 `AGENT_TOKEN` secret 比对。
-- Browser → Worker：可选 `BROWSER_PASSWORD`，通过登录页写入 HttpOnly Cookie。URL 不再使用 `?key=`。
+- Agent → Worker：必须通过 `X-Codex-Token` 请求头携带 token，并和 Worker 的 `AGENT_TOKEN` secret 比对；token 不进入 URL 或日志。
+- Browser → Worker：必须配置 `BROWSER_PASSWORD`，登录成功后写入 HttpOnly Cookie；连续失败 5 次会锁定 15 分钟。仅本地调试可显式设置 `ALLOW_UNAUTHENTICATED=true`。
 - 全链路 HTTPS/WSS。
 
 ---
@@ -190,5 +191,5 @@ BROWSER_PASSWORD=
 
 - 每个 Worker 只有一个 `default` 房间（所有 browser 共享一个 agent）。多用户隔离时换成按用户 ID 分房间。
 - Agent 单条 stdout 行即一条 stream 消息，不做 token 级流式（Codex CLI 本身就是按行）。
-- 审批 (approval)：agent 会识别 Codex 的权限提示并发送 `type:"approval"`，页面显示“允许 / 允许这一类所有 / 拒绝”，选择后通过 stdin 回写给当前 Codex 进程。
+- 审批 (approval)：每次请求带随机 `approvalId`，只发送给触发该会话运行的浏览器标签页；响应一次后立即失效，Agent 回执成功后页面才显示审批结果。
 - 没有数据库；Durable Object 内存即所有状态，重启会丢历史（但 codex 会话文件仍在 `~/.codex`）。

@@ -5,7 +5,8 @@ export { CodexRoom };
 interface Env {
   CODEX_ROOM: DurableObjectNamespace;
   AGENT_TOKEN: string;   // set via `wrangler secret put AGENT_TOKEN`
-  BROWSER_PASSWORD?: string; // optional password for browser login
+  BROWSER_PASSWORD?: string; // required unless local unauthenticated mode is explicit
+  ALLOW_UNAUTHENTICATED?: string; // local development only
 }
 
 const HTML_PAGE = String.raw`<!doctype html>
@@ -1251,6 +1252,8 @@ rootEl.classList.toggle('light', savedTheme === 'light');
 const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 const wsUrl = proto + '://' + location.host + '/ws/client';
 let ws = null;
+let reconnectTimer = null;
+let reconnectDelay = 1000;
 let currentSession = null;
 let sessions = [];
 let connected = false;
@@ -1697,7 +1700,7 @@ function selectSession(id) {
   updateUnreadPill();
   currentSessionMsgCount = 0;
   lastActivityAt = 0;
-  clearApproval();
+  renderPendingApproval();
   setChatHeader(id);
   renderSidebar(sessions);
   updateComposerState();
@@ -1705,10 +1708,18 @@ function selectSession(id) {
   if (window.matchMedia('(max-width: 900px)').matches) { sidebarClose(); infoClose(); }
 }
 
-function showApproval(session, content) {
-  pendingApproval = { session, content };
-  if (session !== currentSession) return;
-  approvalContent.textContent = content || 'Codex 正在等待权限确认';
+function showApproval(session, approvalId, content) {
+  pendingApproval = { session, approvalId, content, submitting: false };
+  renderPendingApproval();
+}
+
+function renderPendingApproval() {
+  if (!pendingApproval || pendingApproval.session !== currentSession) {
+    approvalBar.classList.remove('show');
+    return;
+  }
+  approvalContent.textContent = pendingApproval.content || 'Codex 正在等待权限确认';
+  setApprovalButtonsDisabled(!!pendingApproval.submitting);
   approvalBar.classList.add('show');
 }
 
@@ -1716,13 +1727,37 @@ function clearApproval() {
   pendingApproval = null;
   approvalBar.classList.remove('show');
   approvalContent.textContent = '';
+  setApprovalButtonsDisabled(false);
 }
 
 function submitApproval(decision) {
-  if (!pendingApproval || !currentSession) return;
-  send({ type: 'approval', session: pendingApproval.session || currentSession, decision });
-  appendMessage('system', approvalLabel(decision));
-  clearApproval();
+  if (!pendingApproval || pendingApproval.submitting || !currentSession) return;
+  pendingApproval.submitting = true;
+  pendingApproval.decision = decision;
+  setApprovalButtonsDisabled(true);
+  approvalContent.textContent = (pendingApproval.content || '') + '\n\n正在提交确认...';
+  send({
+    type: 'approval',
+    session: pendingApproval.session,
+    approvalId: pendingApproval.approvalId,
+    decision,
+  });
+}
+
+function handleApprovalResult(message) {
+  if (!pendingApproval || message.approvalId !== pendingApproval.approvalId) return;
+  if (message.success) {
+    appendMessage('system', approvalLabel(pendingApproval.decision));
+    clearApproval();
+    return;
+  }
+  pendingApproval.submitting = false;
+  setApprovalButtonsDisabled(false);
+  approvalContent.textContent = (pendingApproval.content || '') + '\n\n提交失败：' + (message.content || '未知错误');
+}
+
+function setApprovalButtonsDisabled(disabled) {
+  approvalBar.querySelectorAll('[data-approval]').forEach(btn => { btn.disabled = disabled; });
 }
 
 function approvalLabel(decision) {
@@ -2065,10 +2100,26 @@ function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
 
-function connect() {
+async function connect() {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  const auth = await fetch('/api/auth', { cache: 'no-store' }).catch(() => null);
+  if (auth && auth.status === 401) {
+    location.assign('/login?next=' + encodeURIComponent(location.pathname + location.search));
+    return;
+  }
+  if (!auth) {
+    scheduleReconnect();
+    return;
+  }
   dbg('connecting ' + wsUrl);
   ws = new WebSocket(wsUrl);
-  ws.onopen = () => { dbg('ws open'); setAgentOnline(false); send({ type: 'hello' }); };
+  ws.onopen = () => {
+    dbg('ws open');
+    reconnectDelay = 1000;
+    setAgentOnline(false);
+    send({ type: 'hello' });
+    if (currentSession) send({ type: 'subscribe', session: currentSession });
+  };
   ws.onmessage = ev => {
     let m; try { m = JSON.parse(ev.data); } catch { dbg('bad msg: ' + ev.data.slice(0,120)); return; }
     dbg('recv ' + m.type + (m.online !== undefined ? ' online=' + m.online : '') + (m.sessions ? ' sessions=' + m.sessions.length : '') + (m.content ? ' content="' + m.content.slice(0,40) + '"' : ''));
@@ -2097,8 +2148,11 @@ function connect() {
         if (m.session === currentSession) {
           closeStreamingBubble();
           clearThinking();
-          showApproval(m.session, m.content);
+          showApproval(m.session, m.approvalId, m.content);
         }
+        break;
+      case 'approval_result':
+        handleApprovalResult(m);
         break;
       case 'user':
         if (m.session === currentSession) appendMessage('user', m.content);
@@ -2127,8 +2181,23 @@ function connect() {
         break;
     }
   };
-  ws.onclose = (e) => { dbg('ws close code=' + e.code + ' reason=' + e.reason); setAgentOnline(false); setTimeout(connect, 2000); };
+  ws.onclose = (e) => {
+    dbg('ws close code=' + e.code + ' reason=' + e.reason);
+    ws = null;
+    setAgentOnline(false);
+    clearApproval();
+    scheduleReconnect();
+  };
   ws.onerror = (e) => { dbg('ws error'); try { ws.close(); } catch {} };
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, reconnectDelay);
+  reconnectDelay = Math.min(reconnectDelay * 2, 30000);
 }
 
 function autoResizeInput() {
@@ -2312,14 +2381,23 @@ form.addEventListener('submit', async event => {
   event.preventDefault();
   button.disabled = true;
   error.classList.remove('show');
+  error.textContent = '密码不正确';
   try {
     const res = await fetch('/api/login', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ password: password.value })
     });
-    if (!res.ok) throw new Error('login failed');
-    const next = new URLSearchParams(location.search).get('next') || '/';
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      if (res.status === 429) {
+        const minutes = Math.max(1, Math.ceil((body.retryAfter || 0) / 60));
+        error.textContent = '尝试次数过多，请在 ' + minutes + ' 分钟后重试';
+      }
+      throw new Error('login failed');
+    }
+    const requestedNext = new URLSearchParams(location.search).get('next') || '/';
+    const next = requestedNext.startsWith('/') && !requestedNext.startsWith('//') ? requestedNext : '/';
     location.assign(next);
   } catch {
     error.classList.add('show');
@@ -2335,30 +2413,78 @@ form.addEventListener('submit', async event => {
 function json(data: unknown, status = 200, headers: Record<string,string> = {}) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8", ...headers },
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...headers },
   });
+}
+
+function html(content: string, status = 200): Response {
+  return new Response(content, {
+    status,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+    },
+  });
+}
+
+function isSameOriginRequest(request: Request): boolean {
+  const origin = request.headers.get("origin");
+  if (!origin) return false;
+  return origin === new URL(request.url).origin;
 }
 
 const AUTH_COOKIE = "codex_remote_auth";
 const AUTH_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
 
 async function checkBrowserAuth(request: Request, env: Env): Promise<boolean> {
-  if (!env.BROWSER_PASSWORD) return true;
+  if (!env.BROWSER_PASSWORD) return env.ALLOW_UNAUTHENTICATED === "true";
   const token = readCookie(request, AUTH_COOKIE);
   if (!token) return false;
   return verifyAuthToken(token, env.BROWSER_PASSWORD);
 }
 
 async function handleLogin(request: Request, env: Env): Promise<Response> {
-  if (!env.BROWSER_PASSWORD) return json({ ok: true });
+  if (!env.BROWSER_PASSWORD) {
+    if (env.ALLOW_UNAUTHENTICATED === "true") return json({ ok: true });
+    return json({ error: "BROWSER_PASSWORD is not configured" }, 503);
+  }
   const password = await readPassword(request);
-  if (password !== env.BROWSER_PASSWORD) {
+  const passwordMatches = password.length <= 256 && timingSafeEqual(password, env.BROWSER_PASSWORD);
+  const attempt = await recordLoginAttempt(request, env, passwordMatches);
+  if (!attempt.allowed) {
+    return json({ error: "too many login attempts", retryAfter: attempt.retryAfter }, 429, {
+      "retry-after": String(attempt.retryAfter),
+    });
+  }
+  if (!passwordMatches) {
     return json({ error: "bad password" }, 401);
   }
   const token = await createAuthToken(env.BROWSER_PASSWORD);
   return json({ ok: true }, 200, {
     "set-cookie": serializeAuthCookie(request, token, AUTH_MAX_AGE_SECONDS),
   });
+}
+
+async function recordLoginAttempt(
+  request: Request,
+  env: Env,
+  success: boolean,
+): Promise<{ allowed: boolean; retryAfter: number }> {
+  const id = env.CODEX_ROOM.idFromName("default");
+  const stub = env.CODEX_ROOM.get(id);
+  const response = await stub.fetch("http://internal/auth/login-attempt", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      ip: request.headers.get("cf-connecting-ip") || "unknown",
+      success,
+    }),
+  });
+  return await response.json() as { allowed: boolean; retryAfter: number };
 }
 
 function logoutResponse(request: Request): Response {
@@ -2380,19 +2506,21 @@ async function readPassword(request: Request): Promise<string> {
 
 async function createAuthToken(secret: string): Promise<string> {
   const expires = Math.floor(Date.now() / 1000) + AUTH_MAX_AGE_SECONDS;
-  const payload = `v1.${expires}`;
+  const nonce = new Uint8Array(16);
+  crypto.getRandomValues(nonce);
+  const payload = `v1.${expires}.${base64Url(nonce.buffer)}`;
   const signature = await signAuthPayload(payload, secret);
   return `${payload}.${signature}`;
 }
 
 async function verifyAuthToken(token: string, secret: string): Promise<boolean> {
   const parts = token.split(".");
-  if (parts.length !== 3 || parts[0] !== "v1") return false;
+  if (parts.length !== 4 || parts[0] !== "v1") return false;
   const expires = Number(parts[1]);
   if (!Number.isFinite(expires) || expires < Math.floor(Date.now() / 1000)) return false;
-  const payload = `${parts[0]}.${parts[1]}`;
+  const payload = `${parts[0]}.${parts[1]}.${parts[2]}`;
   const expected = await signAuthPayload(payload, secret);
-  return timingSafeEqual(parts[2], expected);
+  return timingSafeEqual(parts[3], expected);
 }
 
 async function signAuthPayload(payload: string, secret: string): Promise<string> {
@@ -2458,31 +2586,42 @@ export default {
 
     // --- Frontend ----------------------------------------------------------
     if (path === "/login" && request.method === "GET") {
+      if (!env.BROWSER_PASSWORD && env.ALLOW_UNAUTHENTICATED !== "true") {
+        return html("<h1>Codex Remote 未配置访问密码</h1><p>请设置 BROWSER_PASSWORD 后重新部署。</p>", 503);
+      }
       if (await checkBrowserAuth(request, env)) return redirect("/");
-      return new Response(LOGIN_PAGE, { headers: { "content-type": "text/html; charset=utf-8" } });
+      return html(LOGIN_PAGE);
     }
-    if (path === "/logout") {
+    if (path === "/logout" && request.method === "POST") {
+      if (!isSameOriginRequest(request)) return json({ error: "bad origin" }, 403);
       return logoutResponse(request);
     }
     if (path === "/api/login" && request.method === "POST") {
+      if (!isSameOriginRequest(request)) return json({ error: "bad origin" }, 403);
       return handleLogin(request, env);
+    }
+    if (path === "/api/auth" && request.method === "GET") {
+      return await checkBrowserAuth(request, env)
+        ? json({ ok: true })
+        : json({ error: "login required" }, 401);
     }
     if (path === "/" || path === "/index.html") {
       if (!await checkBrowserAuth(request, env)) return loginRedirect(request);
-      return new Response(HTML_PAGE, { headers: { "content-type": "text/html; charset=utf-8" } });
+      return html(HTML_PAGE);
     }
 
     // --- WebSocket: browser & agent ---------------------------------------
     if (path === "/ws/client") {
       if (!await checkBrowserAuth(request, env)) return json({ error: "login required" }, 401);
+      if (!isSameOriginRequest(request)) return json({ error: "bad origin" }, 403);
       const id = env.CODEX_ROOM.idFromName("default");
       const stub = env.CODEX_ROOM.get(id);
       // Switch protocol to WebSocket inside the DO
       return stub.fetch(new Request("http://internal/ws/client", request));
     }
     if (path === "/ws/agent") {
-      const token = url.searchParams.get("token") || request.headers.get("x-codex-token") || "";
-      if (!env.AGENT_TOKEN || token !== env.AGENT_TOKEN) {
+      const token = request.headers.get("x-codex-token") || "";
+      if (!env.AGENT_TOKEN || !timingSafeEqual(token, env.AGENT_TOKEN)) {
         return json({ error: "bad agent token" }, 401);
       }
       const id = env.CODEX_ROOM.idFromName("default");
@@ -2503,6 +2642,7 @@ export default {
         return stub.fetch("http://internal/api/status");
       }
       if (path === "/api/send" && request.method === "POST") {
+        if (!isSameOriginRequest(request)) return json({ error: "bad origin" }, 403);
         return stub.fetch(new Request("http://internal/api/send", { method: "POST", body: await request.text() }));
       }
       return json({ error: "not found" }, 404);

@@ -22,17 +22,19 @@ import (
 
 // Agent holds the websocket connection to the Worker and owns the engine.
 type Agent struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	conn   *websocket.Conn
-	worker string
-	token  string
+	ctx     context.Context
+	cancel  context.CancelFunc
+	connMu  sync.RWMutex
+	writeMu sync.Mutex
+	conn    *websocket.Conn
+	worker  string
+	token   string
 
 	engine *Engine
 
-	sessionsMu        sync.Mutex
-	lastSessionsList  []Session
-	lastSessionsJSON  string
+	sessionsMu       sync.Mutex
+	lastSessionsList []Session
+	lastSessionsJSON string
 }
 
 func main() {
@@ -57,7 +59,7 @@ func main() {
 	a := &Agent{
 		ctx:    ctx,
 		cancel: cancel,
-		worker: attachQuery(*workerURL, "token", *token),
+		worker: *workerURL,
 		token:  *token,
 	}
 	a.engine = NewEngine(a)
@@ -115,13 +117,23 @@ func (a *Agent) connectAndServe() error {
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
+	a.connMu.Lock()
 	a.conn = c
-	log.Printf("[agent] connected to %s", u.String())
-	defer c.Close()
+	a.connMu.Unlock()
+	log.Printf("[agent] connected to %s://%s%s", u.Scheme, u.Host, u.Path)
+	defer func() {
+		a.connMu.Lock()
+		if a.conn == c {
+			a.conn = nil
+		}
+		a.connMu.Unlock()
+		_ = c.Close()
+	}()
 
 	// Immediately push full state so a freshly-opened browser sees sessions right away.
 	a.publishSessions()
 	a.publishStatus()
+	a.engine.publishPendingApproval()
 
 	for {
 		_, data, err := c.ReadMessage()
@@ -133,14 +145,19 @@ func (a *Agent) connectAndServe() error {
 }
 
 func (a *Agent) emit(m AgentOutgoing) {
-	if a.conn == nil {
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+	a.connMu.RLock()
+	conn := a.conn
+	a.connMu.RUnlock()
+	if conn == nil {
 		return
 	}
 	data, err := json.Marshal(m)
 	if err != nil {
 		return
 	}
-	_ = a.conn.WriteMessage(websocket.TextMessage, data)
+	_ = conn.WriteMessage(websocket.TextMessage, data)
 }
 
 func (a *Agent) logf(format string, args ...any) {
@@ -175,7 +192,7 @@ func equalSessions(a, b []Session) bool {
 		return false
 	}
 	for i := range a {
-		if a[i].ID != b[i].ID || a[i].Title != b[i].Title {
+		if a[i].ID != b[i].ID || a[i].Title != b[i].Title || a[i].CWD != b[i].CWD || a[i].Time != b[i].Time {
 			return false
 		}
 	}
@@ -264,15 +281,4 @@ func proxyDialContext(ctx context.Context, network, addr string) (net.Conn, erro
 		return nil, fmt.Errorf("proxy CONNECT failed: %s", strings.SplitN(string(buf[:n]), "\r\n", 2)[0])
 	}
 	return pc, nil
-}
-
-func attachQuery(rawURL, k, v string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	q := u.Query()
-	q.Set(k, v)
-	u.RawQuery = q.Encode()
-	return u.String()
 }

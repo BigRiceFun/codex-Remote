@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,12 +20,14 @@ import (
 type Engine struct {
 	mu sync.Mutex
 
-	currentSession string
-	running        bool
-	cmd            *exec.Cmd
-	stdin          io.WriteCloser
-	cancel         context.CancelFunc
-	queue          []queueItem
+	currentSession  string
+	currentClient   string
+	running         bool
+	cmd             *exec.Cmd
+	stdin           io.WriteCloser
+	cancel          context.CancelFunc
+	queue           []queueItem
+	pendingApproval *approvalRequest
 
 	// owner holding the input lock; released after 5m idle.
 	owner      string
@@ -42,9 +46,22 @@ type Engine struct {
 }
 
 type queueItem struct {
-	session string
-	text    string
+	session  string
+	text     string
+	clientID string
 }
+
+type approvalRequest struct {
+	id       string
+	session  string
+	clientID string
+	content  string
+}
+
+const (
+	maxQueuedMessages = 100
+	maxMessageBytes   = 64 * 1024
+)
 
 func NewEngine(a *Agent) *Engine {
 	return &Engine{agent: a}
@@ -76,13 +93,25 @@ func (e *Engine) Snapshot() *StatusPayload {
 }
 
 func (e *Engine) EnqueueOrStart(session, text, who string) {
+	if session == "" || text == "" {
+		return
+	}
+	if len(text) > maxMessageBytes {
+		e.agent.emit(AgentOutgoing{Type: "error", Session: session, Content: "message is too large"})
+		return
+	}
 	e.mu.Lock()
 	if e.owner == "" {
 		e.owner = who
 		e.ownerSince = time.Now()
 	}
 	if e.running {
-		e.queue = append(e.queue, queueItem{session: session, text: text})
+		if len(e.queue) >= maxQueuedMessages {
+			e.mu.Unlock()
+			e.agent.emit(AgentOutgoing{Type: "error", Session: session, Content: "message queue is full"})
+			return
+		}
+		e.queue = append(e.queue, queueItem{session: session, text: text, clientID: who})
 		n := len(e.queue)
 		e.mu.Unlock()
 		e.publishStatus()
@@ -94,9 +123,10 @@ func (e *Engine) EnqueueOrStart(session, text, who string) {
 	// incoming message can't race into start() and hit "context canceled".
 	e.running = true
 	e.currentSession = session
+	e.currentClient = who
 	e.mu.Unlock()
 
-	e.start(session, text)
+	e.start(session, text, who)
 }
 
 func (e *Engine) failStart(session, reason string, cancel context.CancelFunc) {
@@ -105,23 +135,27 @@ func (e *Engine) failStart(session, reason string, cancel context.CancelFunc) {
 	e.mu.Lock()
 	e.running = false
 	e.currentSession = ""
+	e.currentClient = ""
+	var next *queueItem
+	if len(e.queue) > 0 {
+		n := e.queue[0]
+		e.queue = e.queue[1:]
+		e.running = true
+		e.currentSession = n.session
+		e.currentClient = n.clientID
+		next = &n
+	}
 	e.mu.Unlock()
 	e.publishStatus()
 
-	// If there's queued work, pump it.
-	e.mu.Lock()
-	if len(e.queue) > 0 {
-		next := e.queue[0]
-		e.queue = e.queue[1:]
-		e.mu.Unlock()
+	if next != nil {
 		time.Sleep(200 * time.Millisecond)
-		e.start(next.session, next.text)
-	} else {
-		e.mu.Unlock()
+		n := *next
+		e.start(n.session, n.text, n.clientID)
 	}
 }
 
-func (e *Engine) start(session, text string) {
+func (e *Engine) start(session, text, clientID string) {
 	ctx, cancel := context.WithCancel(e.agent.ctx)
 
 	// Find the session's original working directory from the jsonl header,
@@ -160,6 +194,7 @@ func (e *Engine) start(session, text string) {
 	e.stdin = stdin
 	e.cancel = cancel
 	e.currentSession = session
+	e.currentClient = clientID
 	e.running = true
 	e.echoSuppressed = false
 	e.sentPrompt = text
@@ -169,7 +204,6 @@ func (e *Engine) start(session, text string) {
 	e.agent.emit(AgentOutgoing{Type: "system", Session: session, Content: "codex started"})
 
 	go func() {
-		br := bufio.NewReader(stdout)
 		// Phase machine for codex exec stdout:
 		//   "user"            -> start of echo block (user role marker)
 		//   "<prompt>"        -> the prompt we sent (drop)
@@ -180,44 +214,70 @@ func (e *Engine) start(session, text string) {
 			stInUserEcho // inside user block, skip
 		)
 		state := stInit
+		processLine := func(line string) {
+			clean := stripANSI(strings.TrimRight(line, "\r\n"))
+			if clean == "" {
+				return
+			}
+			if state == stInit {
+				if clean == "user" {
+					state = stInUserEcho
+					return
+				}
+			} else if state == stInUserEcho {
+				if clean == "codex" || clean == "assistant" {
+					state = stInit
+				}
+				return
+			}
+			e.mu.Lock()
+			last := e.lastStreamSent
+			e.lastStreamSent = clean
+			e.mu.Unlock()
+			if clean == last {
+				return
+			}
+			if isApprovalPrompt(clean) {
+				approvalID, clientID, approvalErr := e.registerApproval(session, clean)
+				if approvalErr != nil {
+					e.agent.emit(AgentOutgoing{Type: "error", Session: session, Content: "approval id: " + approvalErr.Error()})
+					return
+				}
+				e.agent.emit(AgentOutgoing{
+					Type:       "approval",
+					Session:    session,
+					Content:    clean,
+					ApprovalID: approvalID,
+					ClientID:   clientID,
+				})
+				return
+			}
+			e.agent.emit(AgentOutgoing{Type: "stream", Session: session, Content: clean})
+		}
+
+		buf := make([]byte, 4096)
+		pending := ""
 		for {
-			line, err := br.ReadString('\n')
-			if line != "" {
-				clean := stripANSI(strings.TrimRight(line, "\r\n"))
-				if clean == "" {
-					continue
-				}
-				if state == stInit {
-					if clean == "user" {
-						state = stInUserEcho
-						continue
+			n, err := stdout.Read(buf)
+			if n > 0 {
+				pending += string(buf[:n])
+				for {
+					idx := strings.IndexByte(pending, '\n')
+					if idx < 0 {
+						break
 					}
-					// fall through to emit
-				} else if state == stInUserEcho {
-					// skip prompt echo + "codex" marker; once we see "codex"
-					// we transition back to emitting.
-					if clean == "codex" || clean == "assistant" {
-						state = stInit
-						continue
-					}
-					// still in user echo block
-					continue
+					processLine(pending[:idx+1])
+					pending = pending[idx+1:]
 				}
-				// Dedup adjacent identical lines.
-				e.mu.Lock()
-				last := e.lastStreamSent
-				e.lastStreamSent = clean
-				e.mu.Unlock()
-				if clean == last {
-					continue
+				if pending != "" && isApprovalPrompt(stripANSI(pending)) {
+					processLine(pending)
+					pending = ""
 				}
-				if isApprovalPrompt(clean) {
-					e.agent.emit(AgentOutgoing{Type: "approval", Session: session, Content: clean})
-					continue
-				}
-				e.agent.emit(AgentOutgoing{Type: "stream", Session: session, Content: clean})
 			}
 			if err != nil {
+				if pending != "" {
+					processLine(pending)
+				}
 				break
 			}
 		}
@@ -234,6 +294,7 @@ func (e *Engine) onProcessEnd(session string, waitErr error) {
 		_ = e.stdin.Close()
 		e.stdin = nil
 	}
+	e.pendingApproval = nil
 	if e.cancel != nil {
 		e.cancel()
 		e.cancel = nil
@@ -246,8 +307,11 @@ func (e *Engine) onProcessEnd(session string, waitErr error) {
 	}
 	if next == nil {
 		e.currentSession = ""
+		e.currentClient = ""
 	} else {
+		e.running = true
 		e.currentSession = next.session
+		e.currentClient = next.clientID
 	}
 	e.mu.Unlock()
 
@@ -262,7 +326,7 @@ func (e *Engine) onProcessEnd(session string, waitErr error) {
 	if next != nil {
 		time.Sleep(200 * time.Millisecond)
 		n := *next
-		e.start(n.session, n.text)
+		e.start(n.session, n.text, n.clientID)
 	}
 }
 
@@ -270,22 +334,60 @@ func isApprovalPrompt(line string) bool {
 	lower := strings.ToLower(strings.TrimSpace(line))
 	return strings.Contains(lower, "allow command") ||
 		strings.Contains(lower, "allow this command") ||
+		strings.Contains(lower, "would you like to run") ||
+		strings.Contains(lower, "do you want to proceed") ||
 		strings.Contains(lower, "approve command") ||
 		strings.Contains(lower, "approval required") ||
 		strings.Contains(lower, "requires approval")
 }
 
-func (e *Engine) RespondApproval(session, decision string) error {
+func (e *Engine) registerApproval(session, content string) (string, string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", "", err
+	}
+	id := hex.EncodeToString(buf)
+	e.mu.Lock()
+	clientID := e.currentClient
+	e.pendingApproval = &approvalRequest{id: id, session: session, clientID: clientID, content: content}
+	e.mu.Unlock()
+	return id, clientID, nil
+}
+
+func (e *Engine) publishPendingApproval() {
+	e.mu.Lock()
+	if e.pendingApproval == nil {
+		e.mu.Unlock()
+		return
+	}
+	pending := *e.pendingApproval
+	e.mu.Unlock()
+	e.agent.emit(AgentOutgoing{
+		Type:       "approval",
+		Session:    pending.session,
+		Content:    pending.content,
+		ApprovalID: pending.id,
+		ClientID:   pending.clientID,
+	})
+}
+
+func (e *Engine) RespondApproval(session, approvalID, decision string) error {
 	input := approvalInput(decision)
 	if input == "" {
 		return fmt.Errorf("unknown approval decision: %s", decision)
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if !e.running || e.currentSession != session || e.stdin == nil {
+	if !e.running || e.currentSession != session || e.stdin == nil || e.pendingApproval == nil {
 		return fmt.Errorf("no running approval target")
 	}
+	if e.pendingApproval.id != approvalID || e.pendingApproval.session != session {
+		return fmt.Errorf("approval request does not match")
+	}
 	_, err := io.WriteString(e.stdin, input+"\n")
+	if err == nil {
+		e.pendingApproval = nil
+	}
 	return err
 }
 
@@ -341,20 +443,20 @@ func (e *Engine) OwnerTimeoutLoop() {
 // Per-session cursor: file path -> byte offset we've already sent.
 var fileOffsets sync.Map
 
-// watchedSession is the session id the browser is currently viewing.
-var watchedSession string
+// watchedSessions contains the sessions currently selected by browser clients.
+var watchedSessions []string
 var watchedMu sync.Mutex
 
-func setWatchedSession(id string) {
+func setWatchedSessions(ids []string) {
 	watchedMu.Lock()
-	watchedSession = id
+	watchedSessions = append(watchedSessions[:0], ids...)
 	watchedMu.Unlock()
 }
 
-func getWatchedSession() string {
+func getWatchedSessions() []string {
 	watchedMu.Lock()
 	defer watchedMu.Unlock()
-	return watchedSession
+	return append([]string(nil), watchedSessions...)
 }
 
 func (e *Engine) SessionFileTailLoop() {
@@ -365,15 +467,12 @@ func (e *Engine) SessionFileTailLoop() {
 		case <-e.agent.ctx.Done():
 			return
 		case <-t.C:
-			sid := getWatchedSession()
-			if sid == "" {
-				continue
+			for _, sid := range getWatchedSessions() {
+				path := sessionFileByID(sid)
+				if path != "" {
+					e.tailFile(sid, path)
+				}
 			}
-			path := sessionFileByID(sid)
-			if path == "" {
-				continue
-			}
-			e.tailFile(sid, path)
 		}
 	}
 }
@@ -452,13 +551,26 @@ func (e *Engine) HandleIncoming(raw []byte) {
 	}
 	switch m.Type {
 	case "send":
-		e.EnqueueOrStart(m.Session, m.Text, "web")
-	case "approval":
-		if err := e.RespondApproval(m.Session, m.Decision); err != nil {
-			e.agent.emit(AgentOutgoing{Type: "error", Session: m.Session, Content: "approval: " + err.Error()})
-		} else {
-			e.agent.emit(AgentOutgoing{Type: "system", Session: m.Session, Content: "approval sent: " + m.Decision})
+		clientID := m.ClientID
+		if clientID == "" {
+			clientID = "web"
 		}
+		e.EnqueueOrStart(m.Session, m.Text, clientID)
+	case "approval":
+		err := e.RespondApproval(m.Session, m.ApprovalID, m.Decision)
+		success := err == nil
+		content := "approval accepted"
+		if err != nil {
+			content = err.Error()
+		}
+		e.agent.emit(AgentOutgoing{
+			Type:       "approval_result",
+			Session:    m.Session,
+			Content:    content,
+			ApprovalID: m.ApprovalID,
+			Decision:   m.Decision,
+			Success:    &success,
+		})
 	case "history":
 		// worker is asking us to replay chat history for a session
 		items := ReadHistory(m.Session)
@@ -469,21 +581,24 @@ func (e *Engine) HandleIncoming(raw []byte) {
 				role = "agent"
 			}
 			e.agent.emit(AgentOutgoing{
-				Type:    "history",
-				Session: m.Session,
-				Content: role + "\u0001" + it.Content,
+				Type:      "history",
+				Session:   m.Session,
+				Content:   role + "\u0001" + it.Content,
+				RequestID: m.RequestID,
 			})
 		}
-		e.agent.emit(AgentOutgoing{Type: "system", Session: m.Session, Content: "--- end ---"})
+		e.agent.emit(AgentOutgoing{Type: "history_end", Session: m.Session, RequestID: m.RequestID})
 	case "watch":
-		setWatchedSession(m.Session)
-		if path := sessionFileByID(m.Session); path != "" {
-			if info, err := os.Stat(path); err == nil {
-				fileOffsets.Store(m.Session, info.Size())
-				e.agent.logf("watch: session=%s path=%s size=%d", m.Session, path, info.Size())
+		setWatchedSessions(m.Sessions)
+		for _, session := range m.Sessions {
+			if path := sessionFileByID(session); path != "" {
+				if info, err := os.Stat(path); err == nil {
+					fileOffsets.Store(session, info.Size())
+					e.agent.logf("watch: session=%s path=%s size=%d", session, path, info.Size())
+				}
+			} else {
+				e.agent.logf("watch: session=%s no file found", session)
 			}
-		} else {
-			e.agent.logf("watch: session=%s no file found", m.Session)
 		}
 	}
 }
