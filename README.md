@@ -99,21 +99,55 @@ Engine 状态：
 
 ### 1) Worker
 
+先准备一个 Cloudflare 账户。本机不需要全局安装 Wrangler，项目依赖会提供对应版本。
+
 ```bash
+# 1. 安装项目依赖
 cd worker
 npm install
 
-# 设置 agent token（secret）
+# 2. 登录 Cloudflare
+# 命令会打开浏览器，登录 Cloudflare 并确认授权
+npx wrangler login
+
+# 3. 检查登录状态和当前账户
+npx wrangler whoami
+
+# 4. 首次创建 Worker 和 Durable Object
+npx wrangler deploy
+
+# 5. 设置 Agent 连接密钥
 npx wrangler secret put AGENT_TOKEN
-# 粘贴一个随机字符串，比如 64 位 hex
+# 按提示粘贴一个足够长的随机字符串，例如 64 位十六进制字符串
 
-# 设置浏览器访问密码（生产环境必填，未配置时 Worker 默认拒绝访问）
+# 6. 设置网页登录密码
 npx wrangler secret put BROWSER_PASSWORD
+# 按提示输入浏览器访问 Codex Remote 时使用的密码
 
+# 7. 再次部署，确认源码和配置均为最新版本
 npx wrangler deploy
 ```
 
-部署后你会得到 `https://codex-remote.<you>.workers.dev`。
+`npx wrangler login` 完成的 OAuth 登录信息会保存在本机 Wrangler 配置目录中，之后部署或更新不需要重复登录。登录失效时重新执行该命令即可。
+
+第一次执行 `npx wrangler deploy` 时还没有配置 Secret，但此时 Worker 会拒绝网页登录和 Agent 连接，不会以无密码模式开放。两个 Secret 配置完成后才能正常使用。
+
+部署成功后，终端会显示类似下面的访问地址：
+
+```text
+https://codex-remote.<你的-workers.dev-子域>.workers.dev
+```
+
+以后更新 Worker 只需要：
+
+```bash
+cd worker
+npm install
+npx wrangler whoami
+npx wrangler deploy
+```
+
+只有需要更换 Agent Token 或网页登录密码时，才重新执行对应的 `wrangler secret put` 命令。修改 `AGENT_TOKEN` 后，本地 Agent 使用的 Token 也必须同步更新。
 
 > 首次部署带 `new_classes` migration；后续修改 DO 结构时再加新的 migration tag 即可。
 
