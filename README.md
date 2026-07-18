@@ -10,6 +10,11 @@ Codex 桌面版本身支持和手机 App 同步会话，但前提是桌面端和
 
 浏览器 → Cloudflare Worker (Durable Object) → Windows/Linux Agent → Codex CLI。
 
+## 致谢
+
+感谢 [LINUX DO](https://linux.do/) 社区的支持与讨论
+
+
 ## 目录结构
 
 ```
@@ -301,3 +306,7 @@ BROWSER_PASSWORD=dev-password
 - Agent 单条 stdout 行即一条 stream 消息，不做 token 级流式（Codex CLI 本身就是按行）。
 - 审批 (approval)：每次请求带随机 `approvalId`，只发送给触发该会话运行的浏览器标签页；响应一次后立即失效，Agent 回执成功后页面才显示审批结果。
 - 没有数据库；Durable Object 内存即所有状态，重启会丢历史（但 codex 会话文件仍在 `~/.codex`）。
+
+## License
+
+MIT。上游项目和下载的二进制继续遵循各自许可证。
