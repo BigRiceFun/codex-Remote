@@ -536,19 +536,11 @@ const HTML_PAGE = String.raw`<!doctype html>
     justify-content: flex-end;
     gap: 6px;
     height: 30px;
-    opacity: 0;
-    visibility: hidden;
-    pointer-events: none;
-    transform: translateY(-2px);
-    transition: opacity 160ms ease, transform 160ms ease, visibility 160ms ease;
-    z-index: 5;
-  }
-  .message-shell:hover .message-actions,
-  .message-shell:focus-within .message-actions {
     opacity: 1;
     visibility: visible;
     pointer-events: auto;
-    transform: translateY(0);
+    transform: none;
+    z-index: 5;
   }
   .message-action {
     height: 30px;
@@ -594,14 +586,6 @@ const HTML_PAGE = String.raw`<!doctype html>
   .message-action.copied {
     color: var(--success);
     border-color: var(--success-border);
-  }
-  @media (hover: none) {
-    .message-actions {
-      opacity: 1;
-      visibility: visible;
-      pointer-events: auto;
-      transform: none;
-    }
   }
   .row {
     display: flex;
@@ -1938,7 +1922,7 @@ function closeStreamingBubble() {
 // Message actions live outside the assistant bubble and can grow horizontally
 // as more actions are introduced.
 function attachBubbleActions(shell, kind, raw) {
-  if (kind !== 'agent') return;
+  if (kind !== 'agent' && kind !== 'user') return;
   shell.classList.add('has-actions');
   const actions = document.createElement('div');
   actions.className = 'message-actions';
