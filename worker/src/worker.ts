@@ -18,7 +18,7 @@ const HTML_PAGE = String.raw`<!doctype html>
 <script>
   (function () {
     try {
-      document.documentElement.classList.toggle('light', localStorage.getItem('codex_theme') === 'light');
+      document.documentElement.classList.toggle('light', localStorage.getItem('codex_theme') !== 'dark');
     } catch {}
   })();
 </script>
@@ -48,6 +48,9 @@ const HTML_PAGE = String.raw`<!doctype html>
     --scroll-thumb: #232831;
     --scroll-thumb-hover: #323846;
     --code-text: #d7dde8;
+    --agent-bubble: #181b20;
+    --user-bubble: #243044;
+    --user-bubble-border: #3f587a;
     --radius: 10px;
     --transition: 180ms ease-out;
     --theme-transition: 220ms ease;
@@ -77,6 +80,9 @@ const HTML_PAGE = String.raw`<!doctype html>
     --scroll-thumb: #c4cad3;
     --scroll-thumb-hover: #a8b0bd;
     --code-text: #263244;
+    --agent-bubble: #ffffff;
+    --user-bubble: #e8f2ff;
+    --user-bubble-border: #b9d3f5;
   }
   * { box-sizing: border-box; }
   html.theme-switching *,
@@ -517,37 +523,85 @@ const HTML_PAGE = String.raw`<!doctype html>
   .unread-pill:hover {
     background: var(--hover);
   }
-  .bubble-copy {
+  .message-shell.has-actions {
+    position: relative;
+    margin-bottom: 38px;
+  }
+  .message-actions {
     position: absolute;
-    top: 6px;
-    right: 6px;
-    height: 24px;
-    padding: 0 8px;
-    border-radius: 6px;
-    border: 1px solid var(--border);
-    background: color-mix(in srgb, var(--card) 92%, var(--bg));
-    color: var(--text-secondary);
-    font-size: 11px;
-    cursor: pointer;
+    right: 0;
+    bottom: -38px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    height: 30px;
     opacity: 0;
-    transition: opacity var(--transition), background var(--transition), color var(--transition);
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateY(-2px);
+    transition: opacity 160ms ease, transform 160ms ease, visibility 160ms ease;
     z-index: 5;
   }
-  .message-shell:hover .bubble-copy,
-  .bubble-copy:focus-visible {
+  .message-shell:hover .message-actions,
+  .message-shell:focus-within .message-actions {
     opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transform: translateY(0);
   }
-  .bubble-copy:hover {
-    background: var(--hover);
+  .message-action {
+    height: 30px;
+    padding: 0 10px;
+    border-radius: 11px;
+    border: 1px solid rgba(255,255,255,.08);
+    background: rgba(255,255,255,.03);
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    white-space: nowrap;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+  }
+  html.light .message-action {
+    border-color: rgba(17,24,39,.10);
+    background: rgba(255,255,255,.72);
+  }
+  .message-action:hover {
+    background: rgba(255,255,255,.08);
+    border-color: rgba(255,255,255,.16);
     color: var(--text);
   }
-  .bubble-copy.copied {
+  html.light .message-action:hover {
+    background: rgba(255,255,255,.96);
+    border-color: rgba(17,24,39,.18);
+  }
+  .message-action:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  .message-action svg {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 14px;
+  }
+  .message-action.copied {
     color: var(--success);
     border-color: var(--success-border);
-    opacity: 1;
   }
   @media (hover: none) {
-    .bubble-copy { opacity: 1; }
+    .message-actions {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transform: none;
+    }
   }
   .row {
     display: flex;
@@ -582,14 +636,14 @@ const HTML_PAGE = String.raw`<!doctype html>
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 16px;
-    background: var(--card);
+    background: var(--agent-bubble);
     color: var(--text);
     line-height: 1.65;
     word-break: break-word;
   }
   .bubble.user {
-    background: color-mix(in srgb, var(--card) 80%, var(--hover));
-    border-color: color-mix(in srgb, var(--border) 70%, var(--text-secondary));
+    background: var(--user-bubble);
+    border-color: var(--user-bubble-border);
   }
   .bubble.system {
     background: transparent;
@@ -1247,7 +1301,7 @@ const HTML_PAGE = String.raw`<!doctype html>
 const DEBUG_MODE = new URLSearchParams(location.search).get('debug') === '1';
 const rootEl = document.documentElement;
 const savedTheme = localStorage.getItem('codex_theme');
-rootEl.classList.toggle('light', savedTheme === 'light');
+rootEl.classList.toggle('light', savedTheme !== 'dark');
 
 const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 const wsUrl = proto + '://' + location.host + '/ws/client';
@@ -1283,6 +1337,7 @@ const ICONS = {
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 8.92 4.6H9A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.65 0 1.23.38 1.51 1H21a2 2 0 1 1 0 4h-.09c-.28.62-.86 1-1.51 1Z"/>',
   user: '<path d="M20 21a8 8 0 0 0-16 0"/><circle cx="12" cy="8" r="5"/>',
   copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  check: '<path d="m20 6-11 11-5-5"/>',
   send: '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
   'panel-right': '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M15 4v16"/>',
   close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
@@ -1880,15 +1935,19 @@ function closeStreamingBubble() {
   streamingBubbleCounted = false;
 }
 
-// #7 copy-message button: a small affordance shown on hover. Uses event
-// delegation on the messages container so it works for streaming bubbles too.
+// Message actions live outside the assistant bubble and can grow horizontally
+// as more actions are introduced.
 function attachBubbleActions(shell, kind, raw) {
-  if (kind !== 'agent' && kind !== 'user') return;
+  if (kind !== 'agent') return;
+  shell.classList.add('has-actions');
+  const actions = document.createElement('div');
+  actions.className = 'message-actions';
   const btn = document.createElement('button');
   btn.type = 'button';
-  btn.className = 'bubble-copy';
-  btn.textContent = '复制';
+  btn.className = 'message-action bubble-copy';
+  btn.innerHTML = icon('copy', 14) + '<span>复制</span>';
   btn.title = '复制消息';
+  btn.setAttribute('aria-label', '复制消息');
   btn.addEventListener('click', async (e) => {
     e.stopPropagation();
     const bubble = shell.querySelector('.bubble');
@@ -1896,14 +1955,14 @@ function attachBubbleActions(shell, kind, raw) {
     if (!text || !navigator.clipboard) return;
     await navigator.clipboard.writeText(text);
     btn.classList.add('copied');
-    btn.textContent = '已复制';
+    btn.innerHTML = icon('check', 14) + '<span>已复制</span>';
     setTimeout(() => {
       btn.classList.remove('copied');
-      btn.textContent = '复制';
+      btn.innerHTML = icon('copy', 14) + '<span>复制</span>';
     }, 1200);
   });
-  shell.style.position = 'relative';
-  shell.appendChild(btn);
+  actions.appendChild(btn);
+  shell.appendChild(actions);
 }
 
 let thinkingEl = null;

@@ -38,6 +38,10 @@ type Agent struct {
 }
 
 func main() {
+	if err := acquireAgentInstance(); err != nil {
+		log.Printf("CODEX_REMOTE_STATE=duplicate")
+		log.Fatal(err)
+	}
 	var (
 		workerURL = flag.String("worker", envOr("CODEX_WORKER", "ws://localhost:8787/ws/agent"), "worker ws url (path /ws/agent)")
 		token     = flag.String("token", envOr("CODEX_AGENT_TOKEN", ""), "agent token (must match Worker secret AGENT_TOKEN)")
@@ -85,9 +89,18 @@ func (a *Agent) run() {
 		if a.ctx.Err() != nil {
 			return
 		}
-		err := a.connectAndServe()
+		stateLog("connecting")
+		connected, authFailed, err := a.connectAndServe()
+		if connected {
+			backoff = time.Second
+		}
 		if err != nil {
 			log.Printf("[agent] disconnected: %v", err)
+		}
+		if authFailed {
+			stateLog("auth_failed")
+		} else {
+			stateLog("reconnecting")
 		}
 		select {
 		case <-a.ctx.Done():
@@ -100,10 +113,10 @@ func (a *Agent) run() {
 	}
 }
 
-func (a *Agent) connectAndServe() error {
+func (a *Agent) connectAndServe() (bool, bool, error) {
 	u, err := url.Parse(a.worker)
 	if err != nil {
-		return err
+		return false, false, err
 	}
 	hdr := http.Header{}
 	hdr.Set("User-Agent", "codex-remote-agent")
@@ -113,14 +126,16 @@ func (a *Agent) connectAndServe() error {
 		HandshakeTimeout: 15 * time.Second,
 		NetDialContext:   proxyDialContext,
 	}
-	c, _, err := dialer.DialContext(a.ctx, u.String(), hdr)
+	c, resp, err := dialer.DialContext(a.ctx, u.String(), hdr)
 	if err != nil {
-		return fmt.Errorf("dial: %w", err)
+		authFailed := resp != nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden)
+		return false, authFailed, fmt.Errorf("dial: %w", err)
 	}
 	a.connMu.Lock()
 	a.conn = c
 	a.connMu.Unlock()
 	log.Printf("[agent] connected to %s://%s%s", u.Scheme, u.Host, u.Path)
+	stateLog("connected")
 	defer func() {
 		a.connMu.Lock()
 		if a.conn == c {
@@ -138,11 +153,13 @@ func (a *Agent) connectAndServe() error {
 	for {
 		_, data, err := c.ReadMessage()
 		if err != nil {
-			return err
+			return true, false, err
 		}
 		a.engine.HandleIncoming(data)
 	}
 }
+
+func stateLog(state string) { log.Printf("CODEX_REMOTE_STATE=%s", state) }
 
 func (a *Agent) emit(m AgentOutgoing) {
 	a.writeMu.Lock()

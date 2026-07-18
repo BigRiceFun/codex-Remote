@@ -26,6 +26,9 @@ temp/
 # Local assistant / machine-specific config
 .claude/settings.local.json
 
+# Local Windows launcher source and generated bundle
+/launcher/
+
 # Go agent build artifacts
 agent/*.exe
 agent/*.dll

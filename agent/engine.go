@@ -3,20 +3,17 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"time"
 )
 
-// Engine runs one `codex exec resume <id> "<text>"` at a time, streaming stdout
-// to the worker. If another message arrives while one is running, it's queued.
+// Engine runs one app-server turn at a time. If another message arrives while
+// a turn is running, it is queued.
 type Engine struct {
 	mu sync.Mutex
 
@@ -28,19 +25,11 @@ type Engine struct {
 	cancel          context.CancelFunc
 	queue           []queueItem
 	pendingApproval *approvalRequest
+	approvalQueue   []approvalRequest
 
 	// owner holding the input lock; released after 5m idle.
 	owner      string
 	ownerSince time.Time
-
-	// suppressEcho avoids sending the first lines of codex exec stdout that
-	// just echo our prompt back. Decoded from stream goroutine.
-	echoSuppressed bool
-	sentPrompt     string
-	// lastStreamSent dedups adjacent identical lines from codex exec stdout
-	// (it sometimes prints the final answer twice when reasoning summaries
-	// are off).
-	lastStreamSent string
 
 	agent *Agent
 }
@@ -56,6 +45,9 @@ type approvalRequest struct {
 	session  string
 	clientID string
 	content  string
+	rpcID    json.RawMessage
+	kind     string
+	rpc      *appServerTurn
 }
 
 const (
@@ -168,8 +160,8 @@ func (e *Engine) start(session, text, clientID string) {
 		cwd, _ = os.Getwd()
 	}
 
-	args := []string{"exec", "resume", "--skip-git-repo-check", session, text}
-	cmd := exec.CommandContext(ctx, "codex", args...)
+	cmd := exec.CommandContext(ctx, "codex", "app-server", "--stdio")
+	hideConsoleWindow(cmd)
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(), "NO_COLOR=1", "CLICOLOR=0")
 	stdout, err := cmd.StdoutPipe()
@@ -177,17 +169,22 @@ func (e *Engine) start(session, text, clientID string) {
 		e.failStart(session, "stdout pipe: "+err.Error(), cancel)
 		return
 	}
-	cmd.Stderr = cmd.Stdout
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		e.failStart(session, "stdin pipe: "+err.Error(), cancel)
 		return
 	}
 
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		e.failStart(session, "stderr pipe: "+err.Error(), cancel)
+		return
+	}
 	if err := cmd.Start(); err != nil {
 		e.failStart(session, "start: "+err.Error(), cancel)
 		return
 	}
+	rpc := &appServerTurn{in: stdin}
 
 	e.mu.Lock()
 	e.cmd = cmd
@@ -196,93 +193,16 @@ func (e *Engine) start(session, text, clientID string) {
 	e.currentSession = session
 	e.currentClient = clientID
 	e.running = true
-	e.echoSuppressed = false
-	e.sentPrompt = text
 	e.mu.Unlock()
 	e.publishStatus()
 
-	e.agent.emit(AgentOutgoing{Type: "system", Session: session, Content: "codex started"})
-
+	e.agent.emit(AgentOutgoing{Type: "system", Session: session, Content: "codex started (app-server)"})
+	go copyAppServerErrors(stderr, e.agent.logf)
 	go func() {
-		// Phase machine for codex exec stdout:
-		//   "user"            -> start of echo block (user role marker)
-		//   "<prompt>"        -> the prompt we sent (drop)
-		//   "codex"           -> start of agent role (drop the marker itself)
-		//   anything else     -> real content, stream it
-		const (
-			stInit       = iota
-			stInUserEcho // inside user block, skip
-		)
-		state := stInit
-		processLine := func(line string) {
-			clean := stripANSI(strings.TrimRight(line, "\r\n"))
-			if clean == "" {
-				return
-			}
-			if state == stInit {
-				if clean == "user" {
-					state = stInUserEcho
-					return
-				}
-			} else if state == stInUserEcho {
-				if clean == "codex" || clean == "assistant" {
-					state = stInit
-				}
-				return
-			}
-			e.mu.Lock()
-			last := e.lastStreamSent
-			e.lastStreamSent = clean
-			e.mu.Unlock()
-			if clean == last {
-				return
-			}
-			if isApprovalPrompt(clean) {
-				approvalID, clientID, approvalErr := e.registerApproval(session, clean)
-				if approvalErr != nil {
-					e.agent.emit(AgentOutgoing{Type: "error", Session: session, Content: "approval id: " + approvalErr.Error()})
-					return
-				}
-				e.agent.emit(AgentOutgoing{
-					Type:       "approval",
-					Session:    session,
-					Content:    clean,
-					ApprovalID: approvalID,
-					ClientID:   clientID,
-				})
-				return
-			}
-			e.agent.emit(AgentOutgoing{Type: "stream", Session: session, Content: clean})
-		}
-
-		buf := make([]byte, 4096)
-		pending := ""
-		for {
-			n, err := stdout.Read(buf)
-			if n > 0 {
-				pending += string(buf[:n])
-				for {
-					idx := strings.IndexByte(pending, '\n')
-					if idx < 0 {
-						break
-					}
-					processLine(pending[:idx+1])
-					pending = pending[idx+1:]
-				}
-				if pending != "" && isApprovalPrompt(stripANSI(pending)) {
-					processLine(pending)
-					pending = ""
-				}
-			}
-			if err != nil {
-				if pending != "" {
-					processLine(pending)
-				}
-				break
-			}
-		}
-		waitErr := cmd.Wait()
-		e.onProcessEnd(session, waitErr)
+		runErr := runAppServerTurn(ctx, cmd, rpc, stdout, e, session, text, cwd)
+		cancel()
+		_ = cmd.Wait()
+		e.onProcessEnd(session, runErr)
 	}()
 }
 
@@ -295,6 +215,7 @@ func (e *Engine) onProcessEnd(session string, waitErr error) {
 		e.stdin = nil
 	}
 	e.pendingApproval = nil
+	e.approvalQueue = nil
 	if e.cancel != nil {
 		e.cancel()
 		e.cancel = nil
@@ -330,30 +251,6 @@ func (e *Engine) onProcessEnd(session string, waitErr error) {
 	}
 }
 
-func isApprovalPrompt(line string) bool {
-	lower := strings.ToLower(strings.TrimSpace(line))
-	return strings.Contains(lower, "allow command") ||
-		strings.Contains(lower, "allow this command") ||
-		strings.Contains(lower, "would you like to run") ||
-		strings.Contains(lower, "do you want to proceed") ||
-		strings.Contains(lower, "approve command") ||
-		strings.Contains(lower, "approval required") ||
-		strings.Contains(lower, "requires approval")
-}
-
-func (e *Engine) registerApproval(session, content string) (string, string, error) {
-	buf := make([]byte, 16)
-	if _, err := rand.Read(buf); err != nil {
-		return "", "", err
-	}
-	id := hex.EncodeToString(buf)
-	e.mu.Lock()
-	clientID := e.currentClient
-	e.pendingApproval = &approvalRequest{id: id, session: session, clientID: clientID, content: content}
-	e.mu.Unlock()
-	return id, clientID, nil
-}
-
 func (e *Engine) publishPendingApproval() {
 	e.mu.Lock()
 	if e.pendingApproval == nil {
@@ -372,47 +269,50 @@ func (e *Engine) publishPendingApproval() {
 }
 
 func (e *Engine) RespondApproval(session, approvalID, decision string) error {
-	input := approvalInput(decision)
-	if input == "" {
+	result := appServerDecision(decision)
+	if result == "" {
 		return fmt.Errorf("unknown approval decision: %s", decision)
 	}
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.running || e.currentSession != session || e.stdin == nil || e.pendingApproval == nil {
+	if !e.running || e.currentSession != session || e.pendingApproval == nil {
+		e.mu.Unlock()
 		return fmt.Errorf("no running approval target")
 	}
 	if e.pendingApproval.id != approvalID || e.pendingApproval.session != session {
+		e.mu.Unlock()
 		return fmt.Errorf("approval request does not match")
 	}
-	_, err := io.WriteString(e.stdin, input+"\n")
+	pending := *e.pendingApproval
+	e.mu.Unlock()
+	if pending.rpc == nil {
+		return fmt.Errorf("approval transport is unavailable")
+	}
+	err := pending.rpc.respond(pending.rpcID, map[string]any{"decision": result})
 	if err == nil {
-		e.pendingApproval = nil
+		var next *approvalRequest
+		e.mu.Lock()
+		if e.pendingApproval != nil && e.pendingApproval.id == approvalID {
+			e.pendingApproval = nil
+			if len(e.approvalQueue) > 0 {
+				n := e.approvalQueue[0]
+				e.approvalQueue = e.approvalQueue[1:]
+				e.pendingApproval = &n
+				next = &n
+			}
+		}
+		e.mu.Unlock()
+		if next != nil {
+			e.emitApproval(*next)
+		}
 	}
 	return err
 }
 
-func approvalInput(decision string) string {
-	switch decision {
-	case "allow", "allow_once", "yes":
-		return "y"
-	case "allow_always", "always":
-		return "a"
-	case "deny", "no":
-		return "n"
-	default:
-		return ""
-	}
-}
-
-// PumpStdin is only used for explicit interactive approval responses.
-func (e *Engine) PumpStdin(line string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.stdin == nil {
-		return fmt.Errorf("stdin is not available")
-	}
-	_, err := io.WriteString(e.stdin, line+"\n")
-	return err
+func (e *Engine) emitApproval(p approvalRequest) {
+	e.agent.emit(AgentOutgoing{
+		Type: "approval", Session: p.session, Content: p.content,
+		ApprovalID: p.id, ClientID: p.clientID,
+	})
 }
 
 func (e *Engine) publishStatus() {
@@ -610,32 +510,4 @@ func findSessionByID(list []Session, id string) *Session {
 		}
 	}
 	return nil
-}
-
-// stripANSI removes ANSI escape sequences so terminal-only control codes
-// don't pollute the web view.
-var ansiBuf []byte
-
-func stripANSI(s string) string {
-	if !strings.ContainsAny(s, "\x1b[") {
-		return s
-	}
-	ansiBuf = ansiBuf[:0]
-	inESC := false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c == 0x1b:
-			inESC = true
-		case inESC && c == '[':
-			// CSI introducer consumed
-		case inESC && (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'):
-			inESC = false
-		case inESC:
-			// inside escape: skip
-		default:
-			ansiBuf = append(ansiBuf, c)
-		}
-	}
-	return string(ansiBuf)
 }

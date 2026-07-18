@@ -116,11 +116,16 @@ export class CodexRoom {
 
     serverSide.addEventListener("message", (ev: MessageEvent) => this.onAgentMessage(ev.data));
     serverSide.addEventListener("close", () => {
-      if (this.agent && this.agent.ws === serverSide) this.agent = null;
-      this.broadcast({ type: "agent_status", online: false, sessions: this.sessions, status: this.status });
+      if (this.agent && this.agent.ws === serverSide) {
+        this.agent = null;
+        this.broadcast({ type: "agent_status", online: false, sessions: this.sessions, status: this.status });
+      }
     });
     serverSide.addEventListener("error", () => {
-      if (this.agent && this.agent.ws === serverSide) this.agent = null;
+      if (this.agent && this.agent.ws === serverSide) {
+        this.agent = null;
+        this.broadcast({ type: "agent_status", online: false, sessions: this.sessions, status: this.status });
+      }
     });
 
     this.broadcast({ type: "agent_status", online: true, sessions: this.sessions, status: this.status });

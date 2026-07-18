@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -11,22 +13,23 @@ type bufferWriteCloser struct {
 
 func (b *bufferWriteCloser) Close() error { return nil }
 
-func TestApprovalInput(t *testing.T) {
+func TestAppServerDecision(t *testing.T) {
 	tests := map[string]string{
-		"allow_once":   "y",
-		"allow_always": "a",
-		"deny":         "n",
+		"allow_once":   "accept",
+		"allow_always": "acceptForSession",
+		"deny":         "decline",
 		"unknown":      "",
 	}
 	for decision, want := range tests {
-		if got := approvalInput(decision); got != want {
-			t.Fatalf("approvalInput(%q) = %q, want %q", decision, got, want)
+		if got := appServerDecision(decision); got != want {
+			t.Fatalf("appServerDecision(%q) = %q, want %q", decision, got, want)
 		}
 	}
 }
 
 func TestRespondApprovalRequiresMatchingPendingRequest(t *testing.T) {
 	stdin := &bufferWriteCloser{}
+	rpc := &appServerTurn{in: stdin}
 	e := &Engine{
 		running:        true,
 		currentSession: "session-1",
@@ -34,6 +37,8 @@ func TestRespondApprovalRequiresMatchingPendingRequest(t *testing.T) {
 		pendingApproval: &approvalRequest{
 			id:      "approval-1",
 			session: "session-1",
+			rpcID:   []byte("42"),
+			rpc:     rpc,
 		},
 	}
 
@@ -43,8 +48,8 @@ func TestRespondApprovalRequiresMatchingPendingRequest(t *testing.T) {
 	if err := e.RespondApproval("session-1", "approval-1", "allow_always"); err != nil {
 		t.Fatal(err)
 	}
-	if got := stdin.String(); got != "a\n" {
-		t.Fatalf("stdin = %q, want %q", got, "a\n")
+	if got := stdin.String(); got != "{\"id\":42,\"result\":{\"decision\":\"acceptForSession\"}}\n" {
+		t.Fatalf("stdin = %q", got)
 	}
 	if e.pendingApproval != nil {
 		t.Fatal("expected approval to be consumed")
@@ -54,18 +59,28 @@ func TestRespondApprovalRequiresMatchingPendingRequest(t *testing.T) {
 	}
 }
 
-func TestIsApprovalPrompt(t *testing.T) {
-	for _, prompt := range []string{
-		"Allow command?",
-		"Allow this command to run?",
-		"Would you like to run this command?",
-		"Approval required",
-	} {
-		if !isApprovalPrompt(prompt) {
-			t.Fatalf("expected %q to be recognized", prompt)
-		}
+func TestStructuredCommandApprovalIsRegistered(t *testing.T) {
+	e := &Engine{currentClient: "7", agent: &Agent{}}
+	rpc := &appServerTurn{in: &bufferWriteCloser{}}
+	params, err := json.Marshal(map[string]any{
+		"threadId": "session-1", "turnId": "turn-1", "itemId": "item-1",
+		"command": "Get-Date", "cwd": `C:\work`, "startedAtMs": 1,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if isApprovalPrompt("The command completed successfully") {
-		t.Fatal("normal output should not be recognized as an approval prompt")
+	if err := e.handleAppServerApproval(rpc, appServerMessage{
+		ID: []byte("99"), Method: "item/commandExecution/requestApproval", Params: params,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if e.pendingApproval == nil {
+		t.Fatal("approval was not registered")
+	}
+	if e.pendingApproval.clientID != "7" || string(e.pendingApproval.rpcID) != "99" {
+		t.Fatalf("pending approval = %#v", e.pendingApproval)
+	}
+	if !strings.Contains(e.pendingApproval.content, "Get-Date") {
+		t.Fatalf("content = %q", e.pendingApproval.content)
 	}
 }

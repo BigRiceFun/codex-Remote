@@ -35,7 +35,9 @@ func listViaResumeCLI() ([]Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := exec.Command(bin, "resume", "--list").Output()
+	cmd := exec.Command(bin, "resume", "--list")
+	hideConsoleWindow(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
 	}
