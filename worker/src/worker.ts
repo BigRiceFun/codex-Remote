@@ -1167,7 +1167,6 @@ const HTML_PAGE = String.raw`<!doctype html>
   <div class="header-status">
     <div class="status-pill"><span id="agentDot" class="status-dot"></span><span id="agentState">Agent 离线</span></div>
     <div class="status-pill"><span id="runDot" class="status-dot"></span><span id="runState">空闲</span></div>
-    <div id="ownerPill" class="status-pill" style="display:none"><span id="ownerState">占用者：web</span></div>
   </div>
   <div class="header-right">
     <button id="themeToggle" class="iconbtn theme-button" type="button" aria-label="切换主题" title="切换主题">
@@ -1507,8 +1506,6 @@ function setStatus(s) {
   lastStatus = s;
   $('runDot').className = 'status-dot ' + (s.running ? 'running' : '');
   $('runState').textContent = s.running ? ('运行中' + (s.current ? ': ' + s.current : '')) : '空闲';
-  $('ownerState').textContent = s.owner ? ('占用者：' + s.owner) : '';
-  $('ownerPill').style.display = s.owner ? 'inline-flex' : 'none';
   $('panelRunState').textContent = s.running ? '运行中' : '空闲';
   $('panelQueue').textContent = formatQueueCount((s.queue || []).length);
   const q = $('queue');
