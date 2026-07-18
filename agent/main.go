@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -45,7 +46,7 @@ func main() {
 	var (
 		workerURL = flag.String("worker", envOr("CODEX_WORKER", "ws://localhost:8787/ws/agent"), "worker ws url (path /ws/agent)")
 		token     = flag.String("token", envOr("CODEX_AGENT_TOKEN", ""), "agent token (must match Worker secret AGENT_TOKEN)")
-		agentID   = flag.String("id", envOr("CODEX_AGENT_ID", "windows-pc"), "agent identifier (informational)")
+		agentID   = flag.String("id", envOr("CODEX_AGENT_ID", defaultAgentID()), "agent identifier (informational)")
 	)
 	flag.Parse()
 	_ = agentID
@@ -81,6 +82,13 @@ func main() {
 	a.publishSessions()
 
 	a.run()
+}
+
+func defaultAgentID() string {
+	if hostname, err := os.Hostname(); err == nil && strings.TrimSpace(hostname) != "" {
+		return hostname
+	}
+	return runtime.GOOS + "-host"
 }
 
 func (a *Agent) run() {

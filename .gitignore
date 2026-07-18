@@ -26,6 +26,9 @@ temp/
 # Local assistant / machine-specific config
 .claude/settings.local.json
 
+# Local design and planning documents
+/doc/
+
 # Local Windows launcher source and generated bundle
 /launcher/
 
@@ -35,6 +38,8 @@ agent/*.dll
 agent/*.so
 agent/*.dylib
 agent/*.test
+agent/codex-agent
+agent/codex-agent-linux-*
 agent/coverage.out
 agent/coverage.html
 
